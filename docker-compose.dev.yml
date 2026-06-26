@@ -57,6 +57,9 @@ services:
     build: 
       context: ./metadata
       dockerfile: Dockerfile
+    depends_on:
+      db_metadata:
+        condition: service_healthy
     ports:
         - "8095:80"
     volumes:
@@ -102,6 +105,11 @@ services:
       MYSQL_PASSWORD: 'metadata2023'
       # Password for root access
       MYSQL_ROOT_PASSWORD: 'metadata2023'
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pmetadata2023"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     expose:
       # Opens port 3306 on the container
       - '3306'
