@@ -35,14 +35,13 @@ def clean_system():
     except Exception as e:
         print("Error resetting KAGIO:", e)
     
-    # Because Docker containers write logs/objects as root, clearing them locally via Python 
-    # results in Permission Denied. We use a temporary root Docker container to bypass this.
+    # In Apptainer, files are owned by the user, so we can just delete them directly
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     logs_dir = os.path.join(base_dir, "datacontainer", "code", "logs")
     if os.path.exists(logs_dir):
         try:
-            run_cmd(f"docker run --rm -v {logs_dir}:/logs alpine sh -c 'rm -rf /logs/*'")
+            run_cmd(f"rm -rf {logs_dir}/*")
         except Exception as e:
             print(f"Error clearing logs: {e}")
             
@@ -50,7 +49,7 @@ def clean_system():
         obj_dir = os.path.join(base_dir, "datacontainer", f"objects{i}")
         if os.path.exists(obj_dir):
             try:
-                run_cmd(f"docker run --rm -v {obj_dir}:/obj alpine sh -c 'rm -rf /obj/*'")
+                run_cmd(f"rm -rf {obj_dir}/*")
             except Exception as e:
                 print(f"Error clearing objects{i}: {e}")
 
@@ -60,17 +59,16 @@ def restart_cluster(enable_kagio, enable_replicator, build_containers=False):
         "ENABLE_KAGIO": str(enable_kagio).lower(),
         "ENABLE_REPLICATOR": str(enable_replicator).lower()
     }
-    # Force recreate apigateway and datacontainers
-    build_flag = "--build " if build_containers else ""
-    cmd = f"docker compose -f ../docker-compose.dev.yml up -d {build_flag}--force-recreate apigateway metadata_server datacontainer1 datacontainer2 datacontainer3 datacontainer4 datacontainer5 datacontainer6 datacontainer7 datacontainer8 datacontainer9 datacontainer10"
-    run_cmd(cmd, env)
+    # Stop all apptainer instances and deploy them again
+    run_cmd("apptainer instance stop --all || true", env)
+    run_cmd("cd .. && bash deploy_apptainer.sh", env)
     print("Waiting 15 seconds for services to become healthy...")
     time.sleep(15)
 
 def get_pageranks(kagio_host):
     try:
         KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
-        KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://10.18.173.209:8529/_db/_system/kagio")
+        KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://localhost:8529/_db/_system/kagio")
         KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
         kagio_client = KAGIO(base_url=kagio_host, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
         
@@ -182,7 +180,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     restart_cluster(enable_kagio, enable_replicator, build_containers)
     
     gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
-    kagio_host = os.getenv("KAGIO_HOST", "http://10.18.173.209:8080")
+    kagio_host = os.getenv("KAGIO_HOST", "http://localhost:8080")
     catalog_name = "eval_catalog"
     client = Client(gateway_host)
     rnd = random.Random(42) # Deterministic workload

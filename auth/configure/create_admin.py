@@ -29,7 +29,7 @@ conn = psycopg2.connect(database=os.environ['POSTGRES_DB'],
                         host="localhost",
                         user=os.environ['POSTGRES_USER'],
                         password=os.environ['POSTGRES_PASSWORD'],
-                        port=5432)
+                        port=int(os.environ.get('DB_PORT', 5432)))
 
 try:
     cursor = conn.cursor()

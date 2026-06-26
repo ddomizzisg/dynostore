@@ -307,7 +307,7 @@ class DataController:
             pr_scores = {}
             if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
                 try:
-                    from kagio import KAGIO
+                    from kagio.kagio import KAGIO
                     KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
                     KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
                     KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")

@@ -1,5 +1,13 @@
 import os
 import sys
+import subprocess
+
+try:
+    import kagio
+except ImportError:
+    print("Installing kagio missing from SIF image...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "git+https://github.com/CoCo-ARCOS/kagio-client.git"])
+
 import time
 import logging
 import asyncio
@@ -452,7 +460,7 @@ async def deleteAllDCs(admintoken):
 @app.route("/statistic/<admintoken>", methods=["GET"])
 @validateAdminToken(auth_host=AUTH_HOST)
 async def statistics(admintoken):
-    url_service = f"http://{METADATA_HOST}/api/servers/{admintoken}"
+    url_service = f"http://{METADATA_HOST}/servers/{admintoken}"
     results = requests.get(url_service)
     return jsonify(results.json()), results.status_code
 
@@ -460,7 +468,7 @@ async def statistics(admintoken):
 @app.route("/clean/<admintoken>", methods=["GET"])
 @validateAdminToken(auth_host=AUTH_HOST)
 async def clean(admintoken):
-    url_service = f'http://{METADATA_HOST}/api/clean'
+    url_service = f'http://{METADATA_HOST}/servers/clean/all'
     results = requests.get(url_service)
     return jsonify(results.json()), results.status_code
 

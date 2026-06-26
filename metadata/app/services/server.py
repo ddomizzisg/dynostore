@@ -182,7 +182,7 @@ async def locate_ida(db: Session, token_user: str, file_model):
             if i >= required_chunks:
                 break
             
-            url = f"http://{srv.url}"
+            url = srv.url.rstrip('/') if srv.url.startswith('http') else f"http://{srv.url.rstrip('/')}"
             
             try:
                 print(f"URL: {url}", flush=True)

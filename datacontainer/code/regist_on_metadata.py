@@ -7,7 +7,7 @@ from dynostore.utils.hardware import get_default_partition_size, get_total_memor
 
 def registContainer(admin_token, address, memory, storage, verbose=True):
     url = f'http://{os.environ["APIGATEWAY_HOST"]}/datacontainer/{admin_token}'
-    data = {"memory": memory, "storage": storage, "url": address, "up": 1}
+    data = {"memory": str(memory), "storage": str(storage), "url": address, "up": 1}
     logger.info(f'Sending request to {url} with parameters {data}')
 
     r = requests.post(url, json=data)

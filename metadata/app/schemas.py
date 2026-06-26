@@ -4,7 +4,7 @@ from typing import Optional, List, Any
 # File Schemas
 class FileCreate(BaseModel):
     name: str
-    size: float
+    size: int
     hash: str
     is_encrypted: bool
     chunks: int

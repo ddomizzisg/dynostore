@@ -5,7 +5,7 @@ import json
 class DataContainerController():
     @staticmethod
     async def regist(request, admintoken: str, metadataService: str):
-        url_to_regist = f"http://{metadataService}/api/servers/{admintoken}"
+        url_to_regist = f"http://{metadataService}/servers/{admintoken}"
         print(url_to_regist, flush=True)
 
         json_data = await request.json  
@@ -19,7 +19,7 @@ class DataContainerController():
 
     @staticmethod
     async def delete_all(request, admintoken: str, metadataService: str):
-        url_to_regist = f"http://{metadataService}/api/servers/delete/{admintoken}"
+        url_to_regist = f"http://{metadataService}/servers/delete/{admintoken}"
         print(url_to_regist, flush=True)
         r = requests.get(url_to_regist)
         print(r.status_code, flush=True)

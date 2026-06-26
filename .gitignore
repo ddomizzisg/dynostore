@@ -32,3 +32,7 @@ pyrightconfig.json
 benchmarks/venv/*
 benchmarks/evaluation_report.json
 benchmarks/*.png
+benchmarks/evaluate_scenarios.py
+data/*
+benchmarks/a.txt
+APIGateway/data/app.db

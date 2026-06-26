@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, BigInteger
 from sqlalchemy.orm import relationship
 from database import Base
 import uuid
@@ -9,7 +9,7 @@ class File(Base):
 
     keyfile = Column(String(400), primary_key=True, index=True)
     name = Column(String(1000))
-    size = Column(Float)
+    size = Column(BigInteger)
     chunks = Column(Integer)
     required_chunks = Column(Integer, default=1)
     is_encrypted = Column(Boolean)
@@ -47,7 +47,7 @@ class Chunk(Base):
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False)
     keychunk = Column(String(255), nullable=False)
     name = Column(String(255))
-    size = Column(Float)
+    size = Column(BigInteger)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

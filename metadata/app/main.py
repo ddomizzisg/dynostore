@@ -1,4 +1,13 @@
 import os
+import sys
+import subprocess
+
+try:
+    import kagio
+except ImportError:
+    print("Installing kagio missing from SIF image...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "git+https://github.com/CoCo-ARCOS/kagio-client.git"])
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from dotenv import load_dotenv
@@ -12,6 +21,7 @@ from routers import storage, servers
 async def lifespan(app: FastAPI):
     # Depending on how the production db is created, you might not do this here.
     # Currently assuming tables are already created via Laravel migrations.
+    Base.metadata.create_all(bind=engine)
     yield
 
 app = FastAPI(

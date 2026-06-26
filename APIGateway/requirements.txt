@@ -11,3 +11,4 @@ quart-sqlalchemy
 hypercorn
 httpx
 git+https://github.com/dynostore/log_watcher
+git+https://github.com/CoCo-ARCOS/kagio-client
