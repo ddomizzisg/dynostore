@@ -9,13 +9,13 @@ load_dotenv()
 DB_USERNAME = os.getenv("DB_USERNAME", "metadata")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "metadata2023")
 DB_HOST = os.getenv("DB_HOST", "db_metadata")
-DB_PORT = os.getenv("DB_PORT", "3306")
+DB_PORT = os.getenv("DB_PORT", "5432")
 DB_DATABASE = os.getenv("DB_DATABASE", "metadata-api")
 
 # Using aiomysql URL for async, but we will configure a sync engine
 # Actually let's use pymysql for sync operations to keep it simpler to transition line-by-line.
 # Both work well.
-SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+SQLALCHEMY_DATABASE_URL = f"postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
