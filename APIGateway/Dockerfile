@@ -4,7 +4,7 @@ FROM python:3.12
 ADD requirements.txt /install/requirements.txt
 WORKDIR /install
 
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 RUN pip install git+https://github.com/CoCo-ARCOS/kagio-client.git
 
 ADD start.sh /entrypoint.sh

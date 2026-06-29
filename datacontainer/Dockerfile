@@ -2,7 +2,7 @@ FROM python:3.11
 ADD code /app
 WORKDIR /app
 RUN pip install -r requirements.txt
-RUN pip install git+https://github.com/dynostore/log_watcher
+RUN pip install git+https://github.com/dynostore/log_watcher --no-cache-dir
 
 # Copy start.sh
 COPY start.sh /start.sh

@@ -7,7 +7,7 @@ cd sif_images
 
 echo "Pulling DynoStore SIF images from Docker Hub..."
 if [ -f "dynostore_metadata_v3_1.sif" ] && [ -f "dynostore_apigateway_v1_1.sif" ] && \
-    [ -f "mysql_5.7.sif" ] && [ -f "dynostore_auth_v1.sif" ] && \
+    [ -f "postgres_15.sif" ] && [ -f "dynostore_auth_v1.sif" ] && \
     [ -f "dynostore_databaseauth_v1.sif" ] && [ -f "dynostore_frontend_v1.sif" ] && \
     [ -f "dynostore_dbpubsub_v1.sif" ] && [ -f "dynostore_pubsub_v1.sif" ] && \
     [ -f "dynostore_datacontainer_v1.sif" ]; then
@@ -15,7 +15,7 @@ if [ -f "dynostore_metadata_v3_1.sif" ] && [ -f "dynostore_apigateway_v1_1.sif" 
 else
     apptainer pull dynostore_metadata_v3_1.sif docker://dynostore/metadata:v3.1
     apptainer pull dynostore_apigateway_v1_1.sif docker://dynostore/apigateway:v1.1
-    apptainer pull mysql_5.7.sif docker://mysql:5.7
+    apptainer pull postgres_15.sif docker://postgres:15
     apptainer pull dynostore_auth_v1.sif docker://dynostore/auth:v1
     apptainer pull dynostore_databaseauth_v1.sif docker://dynostore/databaseauth:v1
     apptainer pull dynostore_frontend_v1.sif docker://dynostore/frontend:v1
@@ -28,7 +28,7 @@ fi
 cd ..
 
 echo "Creating necessary directories..."
-mkdir -p logs data/db_metadata data/db_auth data/db_pub_sub data/run_postgresql_auth data/run_postgresql_pubsub APIGateway/data apache_configs/auth apache_configs/frontend apache_configs/pub_sub
+mkdir -p logs data/db_metadata data/db_auth data/db_pub_sub data/run_postgresql_metadata data/run_postgresql_auth data/run_postgresql_pubsub APIGateway/data apache_configs/auth apache_configs/frontend apache_configs/pub_sub
 mkdir -p data/run_apache2_auth data/lock_apache2_auth data/log_apache2_auth
 mkdir -p data/run_apache2_pubsub data/lock_apache2_pubsub data/log_apache2_pubsub
 mkdir -p data/run_apache2_frontend data/lock_apache2_frontend data/log_apache2_frontend
@@ -68,9 +68,9 @@ KAGIO_ENV="--env API_BASE_URL=http://localhost:8080 \
 
 # 1. Databases
 echo "Starting db_metadata..."
-rm -f data/db_metadata/mysql.sock data/db_metadata/mysql.sock.lock
-apptainer instance start -B $(pwd)/data/db_metadata:/var/lib/mysql sif_images/mysql_5.7.sif db_metadata
-apptainer exec $KAGIO_ENV --env MYSQL_DATABASE='metadata-api' --env MYSQL_USER='metadata' --env MYSQL_PASSWORD='metadata2023' --env MYSQL_ROOT_PASSWORD='metadata2023' instance://db_metadata /usr/local/bin/docker-entrypoint.sh mysqld --port=3307 > logs/db_metadata.log 2>&1 &
+rm -f data/db_metadata/.s.PGSQL.*
+apptainer instance start -B $(pwd)/data/run_postgresql_metadata:/var/run/postgresql -B $(pwd)/data/db_metadata:/var/lib/postgresql/data sif_images/postgres_15.sif db_metadata
+apptainer exec $KAGIO_ENV --env LANG=C --env LC_ALL=C --env POSTGRES_DB='metadata-api' --env POSTGRES_USER='metadata' --env POSTGRES_PASSWORD='metadata2023' instance://db_metadata /usr/local/bin/docker-entrypoint.sh postgres -p 5432 > logs/db_metadata.log 2>&1 &
 
 echo "Starting db_auth..."
 apptainer instance start -B $(pwd)/data/run_postgresql_auth:/var/run/postgresql -B $(pwd)/data/db_auth:/var/lib/postgresql/data -B $(pwd)/auth/schema-sql/auth.sql:/docker-entrypoint-initdb.d/auth.sql -B $(pwd)/auth/configure:/configure sif_images/dynostore_databaseauth_v1.sif db_auth
@@ -95,7 +95,7 @@ apptainer exec $KAGIO_ENV --env AUTH_HOST=http://localhost:8090 --env METADATA_H
 # 3. Metadata & APIGateway
 echo "Starting metadata_server..."
 apptainer instance start -B $(pwd)/metadata/app:/var/www sif_images/dynostore_metadata_v3_1.sif metadata_server
-apptainer exec --pwd /var/www $KAGIO_ENV --env DB_HOST=localhost --env DB_PORT=3307 --env DB_USERNAME=metadata --env DB_PASSWORD=metadata2023 --env DB_DATABASE=metadata-api --env APIGATEWAY_HOST=localhost:8070 --env AUTH_HOST=localhost:8090 instance://metadata_server sh -c "uvicorn main:app --reload --host 0.0.0.0 --port 8095" > logs/metadata.log 2>&1 &
+apptainer exec --pwd /var/www $KAGIO_ENV --env DB_HOST=localhost --env DB_PORT=5432 --env DB_USERNAME=metadata --env DB_PASSWORD=metadata2023 --env DB_DATABASE=metadata-api --env APIGATEWAY_HOST=localhost:8070 --env AUTH_HOST=localhost:8090 instance://metadata_server sh -c "uvicorn main:app --reload --host 0.0.0.0 --port 8095" > logs/metadata.log 2>&1 &
 
 echo "Starting apigateway..."
 apptainer instance start -B $(pwd)/APIGateway/data:/data -B $(pwd)/APIGateway/app:/app sif_images/dynostore_apigateway_v1_1.sif apigateway
