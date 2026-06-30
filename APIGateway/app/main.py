@@ -161,6 +161,16 @@ if os.getenv("ENABLE_REPLICATOR", "true").lower() == "true":
 #     with app.app_context():
 #         db.create_all()
 
+# === Endpoint: Force Replication ===
+@app.route("/replicate", methods=["POST"])
+async def force_replication():
+    from dynostore.daemons.replicator import force_replication_cycle
+    success = await force_replication_cycle()
+    if success:
+        return jsonify({"status": "success", "message": "Replication cycle completed"}), 200
+    else:
+        return jsonify({"status": "error", "message": "Replication cycle failed"}), 500
+
 # === Endpoint: CLI gets a device code ===
 
 @app.route("/device/code", methods=["POST"])
@@ -403,6 +413,16 @@ async def deleteCatalog(tokenuser, catalog):
 @validateToken(auth_host=AUTH_HOST)
 async def listCatalogFiles(tokenuser, catalog):
     return CatalogController.listFilesInCatalog(PUB_SUB_HOST, catalog, tokenuser)
+
+@app.route('/pubsub/<tokenuser>/catalogs/subscribed', methods=["GET"])
+@validateToken(auth_host=AUTH_HOST)
+async def getSubscribedCatalogsRoute(tokenuser):
+    return CatalogController.getSubscribedCatalogs(PUB_SUB_HOST, tokenuser)
+
+@app.route('/pubsub/<tokenuser>/catalog/<father>/results', methods=["GET"])
+@validateToken(auth_host=AUTH_HOST)
+async def getSubCatalogsRoute(tokenuser, father):
+    return CatalogController.getSubCatalogs(PUB_SUB_HOST, father)
 
 
 @app.route('/storage/<tokenuser>/<keyobject>', methods=["GET"])

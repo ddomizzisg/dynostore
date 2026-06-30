@@ -428,3 +428,26 @@ code[class*="language-"], pre[class*="language-"] {
 .daterangepicker {
     font-family: 'Inter';
 }
+
+/* Micro-animations and polish */
+.card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1) !important;
+}
+
+.btn {
+    transition: all 0.2s ease;
+}
+
+.btn:active {
+    transform: scale(0.95);
+}
+
+.table-hover tbody tr:hover {
+    background-color: rgba($color-primary, 0.05);
+    transition: background-color 0.2s ease;
+}

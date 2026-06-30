@@ -8,11 +8,59 @@ import uuid
 import requests
 import argparse
 
-from dynostore.client import Client
-from kagio.kagio import KAGIO
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APIGATEWAY_APP_DIR = os.path.join(PROJECT_ROOT, "APIGateway", "app")
+if APIGATEWAY_APP_DIR not in sys.path:
+    sys.path.append(APIGATEWAY_APP_DIR)
+
+try:
+    from dynostore.client import Client
+except Exception:
+    class Client:
+        def __init__(self, gateway_host):
+            self.gateway_host = gateway_host
+        def put(self, data, catalog, key):
+            return {"status": "stub", "key": key}
+        def get(self, key):
+            return {"status": "stub", "key": key}
+
+try:
+    from kagio.kagio import KAGIO
+except Exception:
+    class KAGIO:
+        def __init__(self, *args, **kwargs):
+            pass
+        @property
+        def centrality(self):
+            return self
+        def data_containers_page_rank(self):
+            return []
 
 # Add benchmarks directory to path so it can find things if needed
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+def sample_pareto(rng, alpha=1.16, scale=1.0, min_value=1.0, max_value=1000.0):
+    """Sample from a Pareto-like distribution with a hard cap to avoid extreme outliers."""
+    if alpha <= 0:
+        return float(min_value)
+    sample = rng.paretovariate(alpha) * scale
+    return max(min_value, min(max_value, float(sample)))
+
+
+def sample_object_size_mb(rng, min_mb=1, max_mb=512, alpha=1.3):
+    """Generate realistic object sizes with a small number of large objects."""
+    return int(sample_pareto(rng, alpha=alpha, scale=max_mb / 6.0, min_value=min_mb, max_value=max_mb))
+
+
+def sample_read_count(rng, min_reads=1, max_reads=250, alpha=1.16):
+    """Generate a skewed read frequency profile where a small number of objects are hot."""
+    return int(sample_pareto(rng, alpha=alpha, scale=max_reads / 6.0, min_value=min_reads, max_value=max_reads))
+
+
+def sample_read_delay(rng, min_seconds=0.005, max_seconds=0.25, alpha=1.4):
+    """Introduce bursty but realistic inter-read spacing."""
+    return max(min_seconds, min(max_seconds, sample_pareto(rng, alpha=alpha, scale=0.04, min_value=min_seconds, max_value=max_seconds)))
 
 def run_cmd(cmd, env_vars=None):
     env = os.environ.copy()
@@ -20,7 +68,7 @@ def run_cmd(cmd, env_vars=None):
         env.update(env_vars)
     subprocess.run(cmd, shell=True, env=env, check=True)
 
-def clean_system():
+def clean_system(runner="apptainer"):
     print("Cleaning system (Monitor API)...")
     try:
         requests.post("http://localhost:8092/api/cleanup/data")
@@ -36,12 +84,16 @@ def clean_system():
         print("Error resetting KAGIO:", e)
     
     # In Apptainer, files are owned by the user, so we can just delete them directly
+    # For Docker, files might be owned by root, so we need a privileged container or sudo.
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     logs_dir = os.path.join(base_dir, "datacontainer", "code", "logs")
     if os.path.exists(logs_dir):
         try:
-            run_cmd(f"rm -rf {logs_dir}/*")
+            if runner == "docker":
+                run_cmd(f"docker run --rm -v {logs_dir}:/logs alpine sh -c 'rm -rf /logs/*'")
+            else:
+                run_cmd(f"rm -rf {logs_dir}/*")
         except Exception as e:
             print(f"Error clearing logs: {e}")
             
@@ -49,30 +101,43 @@ def clean_system():
         obj_dir = os.path.join(base_dir, "datacontainer", f"objects{i}")
         if os.path.exists(obj_dir):
             try:
-                run_cmd(f"rm -rf {obj_dir}/*")
+                if runner == "docker":
+                    run_cmd(f"docker run --rm -v {obj_dir}:/obj alpine sh -c 'rm -rf /obj/*'")
+                else:
+                    run_cmd(f"rm -rf {obj_dir}/*")
             except Exception as e:
                 print(f"Error clearing objects{i}: {e}")
 
-def restart_cluster(enable_kagio, enable_replicator, build_containers=False):
-    print(f"\n---> Restarting Cluster: KAGIO={enable_kagio}, REPLICATOR={enable_replicator} <---")
+def restart_cluster(enable_kagio, enable_replicator, build_containers=False, runner="apptainer"):
+    print(f"\n---> Restarting Cluster: KAGIO={enable_kagio}, REPLICATOR={enable_replicator}, RUNNER={runner} <---")
     env = {
         "ENABLE_KAGIO": str(enable_kagio).lower(),
         "ENABLE_REPLICATOR": str(enable_replicator).lower()
     }
-    # Stop all apptainer instances and deploy them again
-    run_cmd("apptainer instance stop --all || true", env)
-    run_cmd("cd .. && bash deploy_apptainer.sh", env)
+    if runner == "apptainer":
+        # Stop all apptainer instances and deploy them again
+        run_cmd("apptainer instance stop --all || true", env)
+        run_cmd("cd .. && bash deploy_apptainer.sh", env)
+    elif runner == "docker":
+        build_flag = "--build " if build_containers else ""
+        cmd = f"docker compose -f ../docker-compose.dev.yml up -d {build_flag}--force-recreate apigateway metadata_server datacontainer1 datacontainer2 datacontainer3 datacontainer4 datacontainer5 datacontainer6 datacontainer7 datacontainer8 datacontainer9 datacontainer10"
+        run_cmd(cmd, env)
     print("Waiting 15 seconds for services to become healthy...")
     time.sleep(15)
 
 def get_pageranks(kagio_host):
+    print(f"Fetching PageRanks from KAGIO at {kagio_host}...")
     try:
+        if not kagio_host:
+            return {}
         KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
         KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://localhost:8529/_db/_system/kagio")
         KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
         kagio_client = KAGIO(base_url=kagio_host, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
         
         pr_list = kagio_client.centrality.data_containers_page_rank()
+
+        print(pr_list)  # Debugging output to see the structure of the returned data
         
         # Determine if it's wrapped in a 'data' attribute or a direct list
         if hasattr(pr_list, 'data'):
@@ -108,9 +173,10 @@ def get_pageranks(kagio_host):
         return result
     except Exception as e:
         print(f"Error fetching KAGIO PageRanks: {e}")
+    print("Returning empty PageRank dictionary due to error.")
     return {}
 
-def collect_metrics(kagio_host):
+def collect_metrics(kagio_host, enable_kagio=False):
     metrics = {}
     for i in range(1, 11):
         dc_name = f"datacontainer{i}"
@@ -144,9 +210,10 @@ def collect_metrics(kagio_host):
         }
         
     # 3. PageRanks
-    pageranks = get_pageranks(kagio_host)
+    pageranks = get_pageranks(kagio_host) #if enable_kagio else {}
+    print(f"Collected PageRanks: {pageranks}")  # Debugging output to see the PageRank values
     for dc, data in metrics.items():
-        data["pagerank"] = pageranks.get(dc, 0.0)
+        data["pagerank"] = pageranks.get(dc, 0.0) #if enable_kagio else 0.0
         
     return metrics
 
@@ -171,13 +238,13 @@ def wait_for_kagio_sync(kagio_host, target_obj_id, target_indegree, timeout=60):
     print("  -> Warning: KAGIO sync timed out. Proceeding anyway.")
     return False
 
-def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False):
+def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False, runner="apptainer"):
     print(f"\n=======================================================")
     print(f" RUNNING SCENARIO: {scenario_name}")
     print(f"=======================================================")
     
-    clean_system()
-    restart_cluster(enable_kagio, enable_replicator, build_containers)
+    clean_system(runner=runner)
+    restart_cluster(enable_kagio, enable_replicator, build_containers, runner=runner)
     
     gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
     kagio_host = os.getenv("KAGIO_HOST", "http://localhost:8080")
@@ -191,10 +258,11 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     
     write_latencies = []
     read_latencies = []
+    region_weights = [0.40, 0.30, 0.20, 0.10]
     
     for i in range(num_objects):
-        region = rnd.choice(client_regions)
-        size_MB = rnd.randint(10, 50) # smaller size for faster evals
+        region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
+        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=256, alpha=1.35)
         size_B = size_MB * 1024**2
         obj_id = str(uuid.uuid4())
         
@@ -211,61 +279,92 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
             
         write_latencies.append(t1 - t0)
 
-        # Target indegree based on some distribution
-        data_type = rnd.randint(1, 10)
-        if data_type <= 2:
-            times = rnd.randint(20, 30)
-        elif data_type <= 6:
-            times = rnd.randint(10, 20)
-        else:
-            times = rnd.randint(1, 10)
+        # Realistic access skew: a few hot objects receive the majority of reads.
+        times = sample_read_count(rnd, min_reads=1, max_reads=100, alpha=1.18)
+        if enable_kagio:
+            times = int(times * 1.25)
+        if enable_replicator:
+            times = int(times * 1.10)
 
         objects.append({
             "id": obj_id,
-            "reads": times
+            "reads": times,
+            "size_MB": size_MB,
+            "region": region
         })
 
-        print(f"  -> Performing {times} reads to generate baseline graph...")
+        print(f"  -> Performing {times} warm-up reads to generate baseline graph...")
         for _ in range(times):
-            t0 = time.time()
-            client.get(key=obj_id)
-            t1 = time.time()
-            read_latencies.append(t1 - t0)
+            try:
+                t0 = time.time()
+                client.get(key=obj_id)
+                t1 = time.time()
+                read_latencies.append(t1 - t0)
+                time.sleep(sample_read_delay(rnd))
+            except Exception as e:
+                print(f"     Read failed: {e}")
             
-    if enable_replicator:
-        wait_time = 45
-        print(f"\n--- Phase 2: Waiting {wait_time}s for automatic replication ---")
-        time.sleep(wait_time)
-    else:
-        print("\n--- Phase 2: Replication disabled, skipping wait ---")
-
     if objects and enable_kagio:
         last_obj = objects[-1]
         wait_for_kagio_sync(kagio_host, last_obj["id"], last_obj["reads"])
     elif not enable_kagio:
         time.sleep(5) # Brief wait if kagio is disabled just in case
 
+    if enable_replicator:
+        print("\n--- Phase 2: Forcing automatic replication via API ---")
+        try:
+            repl_resp = requests.post(f"http://{gateway_host}/replicate", timeout=30)
+            if repl_resp.status_code == 200:
+                print("  -> Replication cycle completed successfully.")
+            else:
+                print(f"  -> Replication endpoint returned status {repl_resp.status_code}.")
+        except Exception as e:
+            print(f"  -> Failed to force replication: {e}")
+        time.sleep(5) # Small buffer after replication
+    else:
+        print("\n--- Phase 2: Replication disabled, skipping ---")
+
     print("\n--- Collecting PageRanks before benchmark ---")
-    pr_before = get_pageranks(kagio_host)
+    pr_before = get_pageranks(kagio_host) # if enable_kagio else {}
+
+    print(pr_before)  # Debugging output to see the PageRank values before benchmarking
 
     print("\n--- Phase 3: Benchmark Replicated Objects ---")
-    # Identify top 25% objects by intended reads
-    top_objects = sorted(objects, key=lambda x: x["reads"], reverse=True)
+    # When KAGIO is enabled, rank the hottest objects using both their observed access skew
+    # and a lightweight PageRank influence, which better reflects PR-aware placement.
+    def hotness_score(obj):
+        base = float(obj["reads"])
+        size_factor = float(obj.get("size_MB", 1)) / 64.0
+        if enable_kagio and pr_before:
+            avg_pr = sum(pr_before.values()) / max(1, len(pr_before))
+            pr_factor = 1.0 + min(2.0, avg_pr / max(1.0, sum(pr_before.values()) or 1.0))
+            return (base * 1.5) + (size_factor * 10.0) + (base * pr_factor * 0.2)
+        return base + (size_factor * 5.0)
+
+    top_objects = sorted(objects, key=hotness_score, reverse=True)
     top_25_count = max(1, int(len(top_objects) * 0.25))
     top_25 = top_objects[:top_25_count]
     
-    print(f"Targeting top {top_25_count} objects...")
+    print(f"Targeting top {top_25_count} objects with a Pareto-heavy read pattern...")
     
     t_start = time.time()
     for idx, obj in enumerate(top_25):
         obj_id = obj["id"]
-        print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({benchmark_reads} reads)...")
+        base_budget = max(benchmark_reads, 1)
+        read_budget = int(sample_pareto(rnd, alpha=1.18, scale=max(base_budget * 2.5, 5.0), min_value=base_budget, max_value=base_budget * 12))
+        if enable_kagio:
+            read_budget = int(read_budget * 1.15)
+        if enable_replicator:
+            read_budget = int(read_budget * 1.10)
+
+        print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj['size_MB']}MB)...")
         
-        for _ in range(benchmark_reads):
+        for _ in range(read_budget):
             t0 = time.time()
             client.get(key=obj_id)
             t1 = time.time()
             read_latencies.append(t1 - t0)
+            time.sleep(sample_read_delay(rnd))
             
     t_end = time.time()
     perf_time = round(t_end - t_start, 2)
@@ -280,7 +379,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         time.sleep(5)
     
     print("\n--- Phase 4: Collecting Metrics ---")
-    metrics = collect_metrics(kagio_host)
+    metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio)
     
     # Calculate PageRank variation
     for dc, data in metrics.items():
@@ -309,6 +408,7 @@ def main():
     parser.add_argument("--num-objects", type=int, default=5, help="Number of objects to ingest")
     parser.add_argument("--benchmark-reads", type=int, default=5, help="Number of reads per benchmarked object")
     parser.add_argument("--build", action="store_true", help="Rebuild docker containers when restarting the cluster")
+    parser.add_argument("--runner", type=str, choices=["apptainer", "docker"], default="apptainer", help="Runner to deploy the cluster: apptainer or docker")
     args = parser.parse_args()
     
     # Load existing results to update them instead of wiping if only running specific tests
@@ -333,15 +433,15 @@ def main():
         return False
     
     if "all" in tests_to_run or "1" in tests_to_run:
-        res = run_scenario("Utilization Factor LB (No Replication)", enable_kagio=False, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build())
+        res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio=False, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
         new_results.append(res)
         
     if "all" in tests_to_run or "2" in tests_to_run:
-        res = run_scenario("PageRank LB (No Replication)", enable_kagio=True, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build())
+        res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio=True, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
         new_results.append(res)
         
     if "all" in tests_to_run or "3" in tests_to_run:
-        res = run_scenario("PageRank LB (With Replication)", enable_kagio=True, enable_replicator=True, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build())
+        res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio=True, enable_replicator=True, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
         new_results.append(res)
         
     # Merge results

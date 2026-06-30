@@ -7,5 +7,7 @@ RewriteCond %{QUERY_STRING} tokenuser=(\w+)
 RewriteRule ^catalog/([A-Za-z0-9\-_]+)/?$ api.php?type=1&catalog=$1&tokenuser=$2 [QSA,NC,L]
 RewriteRule ^catalog/([a-z0-9]{32,256})/object/([0-9a-zA-Z-]{32,256})?$ api.php?type=2&catalog=$1&keyobject=$2 [QSA,NC,L]
 RewriteRule ^list/catalog/([a-z0-9]{32,256})/?$ api.php?type=3&catalog=$1 [QSA,NC,L]
+RewriteRule ^user/([A-Za-z0-9\-_]+)/catalogs/subscribed/?$ api.php?type=4&tokenuser=$1 [QSA,NC,L]
+RewriteRule ^catalog/([A-Za-z0-9\-_]+)/results/?$ api.php?type=5&father=$1 [QSA,NC,L]
 
 </IfModule>

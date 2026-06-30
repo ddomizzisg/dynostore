@@ -163,9 +163,9 @@ services:
         ipv4_address: 10.88.0.15
 
   frontend: #Interfez gráfica
-    image: dynostore/frontend:v1
+    image: dynostore/frontend:v2
     build: 
-      context: ./frontend
+      context: ./frontend_v2
       dockerfile: Dockerfile
     ports:
       - "8091:80"
@@ -176,8 +176,8 @@ services:
     environment:
       <<: *kagio-env
       APIGATEWAY_HOST: apigateway
-    volumes:
-      - ./frontend/frontend/:/var/www/html/
+    #volumes:
+    #  - ./frontend/frontend/:/var/www/html/
     restart: always
     networks:
       dynonetwork:

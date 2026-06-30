@@ -76,7 +76,7 @@ services:
     restart: always
 
   frontend: #Interfez gráfica
-    image: dynostore/frontend:v1
+    build: ./frontend_v2
     ports:
       - "8090:80"
     depends_on:

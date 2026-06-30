@@ -213,14 +213,11 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
             
         write_latencies.append(t1 - t0)
 
-        # Target indegree based on some distribution
-        data_type = rnd.randint(1, 10)
-        if data_type <= 2:
-            times = rnd.randint(20, 30)
-        elif data_type <= 6:
-            times = rnd.randint(10, 20)
-        else:
-            times = rnd.randint(1, 10)
+        # Target indegree based on a Pareto distribution (alpha=1.16 for ~80/20 rule)
+        # Using a base scale and capping it to avoid infinite test times
+        times = int(rnd.paretovariate(1.16) * 5)
+        # Ensure at least 1 read and cap at e.g., 200 for practical benchmarking time
+        times = max(1, min(times, 200))
 
         objects.append({
             "id": obj_id,
@@ -229,10 +226,14 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
 
         print(f"  -> Performing {times} reads to generate baseline graph...")
         for _ in range(times):
-            t0 = time.time()
-            client.get(key=obj_id)
-            t1 = time.time()
-            read_latencies.append(t1 - t0)
+            try:
+                t0 = time.time()
+                client.get(key=obj_id)
+                t1 = time.time()
+                read_latencies.append(t1 - t0)
+                time.sleep(0.05) # Prevent overloading with continuous bursts
+            except Exception as e:
+                print(f"     Read failed: {e}")
             
     if enable_replicator:
         wait_time = 45

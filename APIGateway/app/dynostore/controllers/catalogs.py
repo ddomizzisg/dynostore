@@ -49,6 +49,24 @@ class CatalogController():
         url_service = f'http://{pubsub}/catalog/{catalog}/?tokenuser={tokenuser}'
         results = requests.get(url_service)
         return results.json(), results.status_code
+
+    @staticmethod
+    def getSubscribedCatalogs(
+        pubsub: str, 
+        tokenuser: str
+    ):
+        url_service = f'http://{pubsub}/user/{tokenuser}/catalogs/subscribed'
+        results = requests.get(url_service)
+        return results.json(), results.status_code
+
+    @staticmethod
+    def getSubCatalogs(
+        pubsub: str, 
+        father: str
+    ):
+        url_service = f'http://{pubsub}/catalog/{father}/results'
+        results = requests.get(url_service)
+        return results.json(), results.status_code
     
     @staticmethod
     def registFileInCatalog(

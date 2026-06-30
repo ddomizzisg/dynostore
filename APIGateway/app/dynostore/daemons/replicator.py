@@ -22,12 +22,18 @@ def start_replicator_daemon():
 def replicator_loop():
     # Wait a bit before starting
     time.sleep(10)
+    logger.info("Replicator daemon started.")
     
-    
+    while True:
+        asyncio.run(force_replication_cycle())
+        # Parameterized for evaluation: every 5 minutes (300 seconds)
+        time.sleep(300)
+
+async def force_replication_cycle():
     metadata_service = os.getenv("METADATA_HOST", "metadata_server")
     pubsub_service = os.getenv("PUB_SUB_HOST", "pub_sub")
     
-    logger.info(f"Replicator daemon started. Connecting to KAGIO at {KAGIO_BASE_URL} with Foxx at {KAGIO_FOXX_URL} (DB: {KAGIO_FOXX_DB})")
+    logger.info(f"Connecting to KAGIO at {KAGIO_BASE_URL} with Foxx at {KAGIO_FOXX_URL} (DB: {KAGIO_FOXX_DB})")
     
     try:
         kagio_client = KAGIO(
@@ -38,56 +44,41 @@ def replicator_loop():
         )
     except Exception as e:
         logger.error(f"Failed to initialize KAGIO client: {e}")
-        return
+        return False
 
-    while True:
+    try:
+        logger.info("Polling KAGIO for popular objects...")
         try:
-            logger.info("Polling KAGIO for popular objects...")
-            try:
-                object_reads = kagio_client.centrality.metadata_indegree()
-            except Exception as e:
-                logger.error(f"Error fetching indegree from KAGIO: {e}")
-                object_reads = []
-
-            # Sort by indegree descending and take top 25
-            object_reads.sort(key=lambda x: x.get("indegree", 0), reverse=True)
-            top_objects = object_reads[:25]
-
-            for obj_degree in top_objects:
-                n_reads = obj_degree.get("indegree", 0)
-                if n_reads == 0:
-                    continue
-
-                obj_id_ori = obj_degree.get("metadata_id", "").replace("metadata_", "")
-                if not obj_id_ori:
-                    continue
-                
-                # Check if it is already a replica
-                if "_r" in obj_id_ori:
-                    continue
-
-                new_obj_id = obj_id_ori + "_r2"
-                
-                # We need the tokenuser (owner) of the original object to authenticate requests.
-                # In this background daemon, we will fetch metadata to get the owner.
-                url_metadata = f"http://{metadata_service}/storage/system/{obj_id_ori}/exists"
-                
-                # We can use the DataController exists_object but we need the token_user.
-                # If we don't know the tokenuser, we can query metadata directly (we assume system token or we just query the DB).
-                # Wait, exists_object uses the tokenuser to verify ownership.
-                # Since we don't have the original tokenuser easily available without querying the metadata DB directly, 
-                # we can modify the replication logic to just use a "system" user, or we can fetch the owner from metadata first.
-                
-                # Actually, let's just make a direct HTTP call to metadata server if we need to.
-                # Since we are inside APIGateway, we can use the DataController.
-                # Let's use asyncio to run the async functions.
-                asyncio.run(replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pubsub_service))
-
+            object_reads = kagio_client.centrality.metadata_indegree()
         except Exception as e:
-            logger.error(f"Replicator daemon error: {e}")
+            logger.error(f"Error fetching indegree from KAGIO: {e}")
+            object_reads = []
 
-        # Parameterized for evaluation: every 5 minutes (300 seconds)
-        time.sleep(30)
+        # Sort by indegree descending and take top 25
+        object_reads.sort(key=lambda x: x.get("indegree", 0), reverse=True)
+        top_objects = object_reads[:25]
+
+        for obj_degree in top_objects:
+            n_reads = obj_degree.get("indegree", 0)
+            if n_reads == 0:
+                continue
+
+            obj_id_ori = obj_degree.get("metadata_id", "").replace("metadata_", "")
+            if not obj_id_ori:
+                continue
+            
+            # Check if it is already a replica
+            if "_r" in obj_id_ori:
+                continue
+
+            new_obj_id = obj_id_ori + "_r2"
+            
+            await replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pubsub_service)
+        
+        return True
+    except Exception as e:
+        logger.error(f"Replicator cycle error: {e}")
+        return False
 
 async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pubsub_service):
     import aiohttp

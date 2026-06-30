@@ -17,6 +17,12 @@ if (isset($_GET['type'])) {
 		case 3:
 			$api->listFilesInCatalog($_GET['catalog']);
 			break;
+		case 4:
+			$api->getSubscribedCatalogs();
+			break;
+		case 5:
+			$api->getSubCatalogs();
+			break;
 		default:
 			$api->notFound();
 			break;

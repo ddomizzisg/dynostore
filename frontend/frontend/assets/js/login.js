@@ -12,17 +12,13 @@ $('#login').click(function (evt) {
 
     // Traemos los datos de los inputs
     evt.preventDefault();
-    var user = $('#email').val();
-    var clave = $('#password').val();
-    if (user == "" || clave == "") {
+    var user = $('input[name="username"]').val();
+    var clave = $('input[name="password"]').val();
+    var $btn = $(this);
+    
+    if (!user || !clave) {
         swal('Error', 'Ingrese todos los campos', 'error');
     } else {
-        var d = {};
-        d['email'] = user;
-        d['password'] = clave;
-        //d['location'] = window.location;
-        //d['origin'] = window.location.origin;
-        dd = JSON.stringify(d);
         // Envio de datos mediante Ajax
         console.log($("#login_form").serialize());
         $.ajax({
@@ -31,15 +27,13 @@ $('#login').click(function (evt) {
                 data: $("#login_form").serialize(),
                 // Esta funcion se ejecuta antes de enviar la información al archivo indicado en el parametro url
                 beforeSend: function () {
-                    $('#load').html('<div class="col-xs-12 center text-accent">' +
-                        '<span>Validando datos...</span>' +
-                        '</div>');
-                    $('#load').show();
+                    $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm mr-2"></span>Iniciando...');
+                    toastr.info('Validando credenciales...');
                 }
             })
             .done(function (res) {
                 console.log(res);
-                $('#load').hide();
+                $btn.prop('disabled', false).html('Iniciar sesión');
                 if (res == 'ok') {
                     toastr.success('Inicio de sesión correcto');
                     window.location.replace("index.php");
@@ -49,7 +43,7 @@ $('#login').click(function (evt) {
             })
             .fail(function (res) {
                 console.log(res);
-                $('#load').hide();
+                $btn.prop('disabled', false).html('Iniciar sesión');
                 if (res) {
                     resJson = res.responseJSON;
                     if (resJson) {

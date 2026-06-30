@@ -56,12 +56,19 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
     w_uf_default = uf_weight / total_w
     w_pr_default = pr_weight / total_w
 
+    print(f"Sorting nodes with weights: uf={w_uf_default}, pr={w_pr_default}", flush=True)
+
     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
         # Fetch PR from KAGIO
         pr_map = get_kagio_pageranks()
 
+        print(f"PR Map: {pr_map}", flush=True)  # Debugging output to see the PageRank values
+
         uf_vals = [node["uf"] for node in nodes]
         pr_vals = [pr_map.get(node["id"], 0.0) for node in nodes]
+
+        print(f"UF Values: {uf_vals}", flush=True)  # Debugging output to see the UF values
+        print(f"PR Values: {pr_vals}", flush=True)  # Debugging output
         
         uf_norm = _norm(uf_vals)
         pr_norm = _norm(pr_vals)
@@ -72,6 +79,8 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
             node["score"] = (w_uf_default * uf_norm[i]) + (w_pr_default * pr_norm[i]) + epsilon
             
         nodes.sort(key=lambda x: x["score"])
+
+        print(f"Sorted nodes by score: {[node for node in nodes]}", flush=True)  # Debugging output to see the sorted scores
     else:
         nodes.sort(key=lambda x: x["uf"])
 
@@ -149,8 +158,9 @@ def locate_single(db: Session, token_user: str, file_model):
     if nodes:
         if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
             pr_map = get_kagio_pageranks()
-            # If a server has no PR in the map, default to 1.0 (lowest priority)
-            nodes.sort(key=lambda x: pr_map.get(x[1].id, 1.0))
+            # Prefer lower PageRank containers for reads so traffic is spread away from the hottest/high-PR replicas.
+            print(f"PR Map for locating single: {pr_map}", flush=True)  # Debugging output to see the PageRank values
+            nodes.sort(key=lambda x: pr_map.get(x[1].id, float("inf")))
         fis, srv = nodes[0]
         result.append({"route": f"{srv.url}/objects/{file_model.keyfile}/{token_user}"})
     return result
@@ -167,8 +177,10 @@ async def locate_ida(db: Session, token_user: str, file_model):
     
     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
         pr_map = get_kagio_pageranks()
-        # If a server has no PR in the map, default to 1.0 (lowest priority)
-        chunks_query.sort(key=lambda x: pr_map.get(x[1].id, 1.0))
+        print(f"PR Map for locating IDA: {pr_map}", flush=True)  # Debugging output to see the PageRank values
+        # Prefer lower PR containers for reads to avoid saturating high-PR replicas.
+        chunks_query.sort(key=lambda x: pr_map.get(x[1].id, float("inf")))
+        print(f"Sorted chunks_query by PR: {chunks_query}", flush=True)  # Debugging output to see the sorted chunks
         
     result = []
     i: int = 0

@@ -60,6 +60,52 @@ class Catalog extends REST
     
     }
 
+    public function getSubscribedCatalogs() {
+        if ($this->getRequestMethod() != "GET") {
+            $this->methodNotAllowed();
+            return;
+        }
+        if(isset($_GET['tokenuser'])){
+            $db = new DbHandler();
+            $catalogs = $db->getCatalogsByUser_Sub($_GET['tokenuser']);
+            
+            // Filter only root catalogs (father == '/')
+            $rootCatalogs = [];
+            if ($catalogs) {
+                foreach($catalogs as $cat) {
+                    if ($cat['father'] == '/') {
+                        $rootCatalogs[] = $cat;
+                    }
+                }
+            }
+
+            $msg['message'] = "Success";
+            $msg['data'] = $rootCatalogs;
+            $this->response($this->json($msg), 200);
+        } else {
+            $msg['message'] = "tokenuser not provided";
+            $this->response($this->json($msg), 400);
+        }
+    }
+
+    public function getSubCatalogs() {
+        if ($this->getRequestMethod() != "GET") {
+            $this->methodNotAllowed();
+            return;
+        }
+        if(isset($_GET['father'])){
+            $db = new DbHandler();
+            $catalogs = $db->getSubCatalogs($_GET['father']);
+            
+            $msg['message'] = "Success";
+            $msg['data'] = $catalogs ? $catalogs : [];
+            $this->response($this->json($msg), 200);
+        } else {
+            $msg['message'] = "father not provided";
+            $this->response($this->json($msg), 400);
+        }
+    }
+
     public function createCatalog()
     {
         if (
