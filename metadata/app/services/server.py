@@ -20,22 +20,24 @@ KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", None)
 def _norm(vals: list[float]) -> list[float]:
     if not vals:
         return []
-    vmin, vmax = min(vals), max(vals)
-    if math.isclose(vmin, vmax, rel_tol=1e-12, abs_tol=1e-12):
+    vmax = max(vals)
+    if vmax <= 1e-12:
         return [0.0] * len(vals)
-    return [(v - vmin) / (vmax - vmin) for v in vals]
+    return [v / vmax for v in vals]
 
 def get_kagio_pageranks() -> dict:
     pr_map = {}
     if os.getenv("ENABLE_KAGIO", "true").lower() != "true":
         return pr_map
+    print(f"Fetching KAGIO pageranks from {KAGIO_BASE_URL} with FOXX URL {KAGIO_FOXX_URL} and DB {KAGIO_FOXX_DB}", flush=True)
     
     try:
         kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
         ranks = kagio_client.centrality.data_containers_page_rank()
         for entry in ranks:
             try:
-                dc_id = int(str(entry["id"]).replace("datacontainer-", "").replace("dc-", ""))
+                dc_id = int(str(entry["id"]).replace("datacontainer-", "").replace("dc-", "")) + 1
+                print(f"Data container ID: {dc_id}, PageRank: {entry['pagerank']}", flush=True)  # Debugging output to see the data container ID and its PageRank
                 pr_map[dc_id] = float(entry["pagerank"])
             except Exception:
                 continue
@@ -61,7 +63,8 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
         # Fetch PR from KAGIO
         pr_map = get_kagio_pageranks()
-
+        
+        print(f"Nodes before sorting: {nodes}", flush=True)  # Debugging output to see the nodes before sorting
         print(f"PR Map: {pr_map}", flush=True)  # Debugging output to see the PageRank values
 
         uf_vals = [node["uf"] for node in nodes]
@@ -76,8 +79,10 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
         rng = random.Random()
         for i, node in enumerate(nodes):
             epsilon = rng.random() * 1e-6
-            node["score"] = (w_uf_default * uf_norm[i]) + (w_pr_default * pr_norm[i]) + epsilon
-            
+            # INVERT PR: Cold nodes have HIGH PR. We want a LOW score to be picked. 
+            # So a high PR should result in a low PR score component.
+            node["score"] = (w_uf_default * uf_norm[i]) + (w_pr_default * (1.0 - pr_norm[i])) + epsilon
+
         nodes.sort(key=lambda x: x["score"])
 
         print(f"Sorted nodes by score: {[node for node in nodes]}", flush=True)  # Debugging output to see the sorted scores
@@ -158,9 +163,9 @@ def locate_single(db: Session, token_user: str, file_model):
     if nodes:
         if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
             pr_map = get_kagio_pageranks()
-            # Prefer lower PageRank containers for reads so traffic is spread away from the hottest/high-PR replicas.
+            # Prefer HIGHER PageRank containers for reads so traffic is spread away from the hottest/low-PR replicas.
             print(f"PR Map for locating single: {pr_map}", flush=True)  # Debugging output to see the PageRank values
-            nodes.sort(key=lambda x: pr_map.get(x[1].id, float("inf")))
+            nodes.sort(key=lambda x: pr_map.get(x[1].id, float("-inf")), reverse=True)
         fis, srv = nodes[0]
         result.append({"route": f"{srv.url}/objects/{file_model.keyfile}/{token_user}"})
     return result
@@ -178,8 +183,8 @@ async def locate_ida(db: Session, token_user: str, file_model):
     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
         pr_map = get_kagio_pageranks()
         print(f"PR Map for locating IDA: {pr_map}", flush=True)  # Debugging output to see the PageRank values
-        # Prefer lower PR containers for reads to avoid saturating high-PR replicas.
-        chunks_query.sort(key=lambda x: pr_map.get(x[1].id, float("inf")))
+        # Prefer HIGHER PR containers for reads to avoid saturating low-PR hot replicas.
+        chunks_query.sort(key=lambda x: pr_map.get(x[1].id, float("-inf")), reverse=True)
         print(f"Sorted chunks_query by PR: {chunks_query}", flush=True)  # Debugging output to see the sorted chunks
         
     result = []

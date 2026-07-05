@@ -5,10 +5,10 @@ from dynostore.utils.csvlog import make_csv_logger
 from dynostore.utils.hardware import get_dir_size
 
 DATA_CONTAINEER_ID = os.getenv("DATA_CONTAINER_ID")
-DC_NAME = f"DATACONTAINER_{DATA_CONTAINEER_ID}"
+DC_NAME = f"datacontainer_{DATA_CONTAINEER_ID}"
 
 # ----- logging (wrap to prefix status with FS_) -----
-_base_log = make_csv_logger(DC_NAME, __name__)
+_base_log = make_csv_logger(DC_NAME, f"dynostore.{__name__}")
 
 def _log(operation: str, key: str, phase: str, status: str, msg: str = ""):
     # SERVICE, OPERATION, OBJECTKEY, START/END, Status, MSG
@@ -30,6 +30,12 @@ class StorageManager:
         pass
 
     def write(self, key: str, data: bytes) -> bool:
+        pass
+
+    def read_stream(self, key: str):
+        pass
+
+    def write_stream(self, key: str, stream) -> dict:
         pass
 
     def exists(self, key: str) -> bool:
@@ -109,7 +115,7 @@ class FileSystemStorage(StorageManager):
                 f.write(data)
             write_ms = _ms_since(t_write)
             self.utilization += len(data)
-            _log("WRITE", key, "END", "FS_SUCCESS",
+            _log("WRITE", key, "END", "SUCCESS",
                  f"path={filepath};bytes={len(data)};utilization={self.utilization};"
                  f"mkdir_time_ms={mkdir_ms:.3f};write_time_ms={write_ms:.3f};total_time_ms={_ms_since(t_total):.3f}")
             return True
@@ -117,6 +123,58 @@ class FileSystemStorage(StorageManager):
             _log("WRITE", key, "END", "ERROR",
                  f"path={filepath};msg={e};total_time_ms={_ms_since(t_total):.3f}")
             return False
+
+    def read_stream(self, key: str, chunk_size=8192):
+        t_total = _t0()
+        _log("READ_STREAM", key, "START", "RUN", "")
+        filepath = self._full_path(key)
+        
+        # Check if exists first before returning generator
+        if not os.path.exists(filepath):
+            _log("READ_STREAM", key, "END", "NOT_FOUND", f"path={filepath}")
+            raise FileNotFoundError(f"File not found: {filepath}")
+            
+        try:
+            def generate():
+                with open(filepath, 'rb') as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+                _log("READ_STREAM", key, "END", "SUCCESS", f"path={filepath};total_time_ms={_ms_since(t_total):.3f}")
+            return generate()
+        except Exception as e:
+            _log("READ_STREAM", key, "END", "ERROR", f"path={filepath};msg={e};total_time_ms={_ms_since(t_total):.3f}")
+            raise
+
+    def write_stream(self, key: str, stream, chunk_size=8192) -> dict:
+        t_total = _t0()
+        filepath = self._full_path(key)
+        try:
+            t_mkdir = _t0()
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            mkdir_ms = _ms_since(t_mkdir)
+            
+            t_write = _t0()
+            bytes_written = 0
+            with open(filepath, 'wb') as f:
+                while True:
+                    chunk = stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+            write_ms = _ms_since(t_write)
+            self.utilization += bytes_written
+            _log("WRITE", key, "END", "SUCCESS",
+                 f"path={filepath};bytes={bytes_written};utilization={self.utilization};"
+                 f"mkdir_time_ms={mkdir_ms:.3f};write_time_ms={write_ms:.3f};total_time_ms={_ms_since(t_total):.3f}")
+            return {"bytes": bytes_written, "write_time_ms": write_ms, "total_time_ms": _ms_since(t_total)}
+        except Exception as e:
+            _log("WRITE", key, "END", "ERROR",
+                 f"path={filepath};msg={e};total_time_ms={_ms_since(t_total):.3f}")
+            raise
 
     def exists(self, key: str) -> bool:
         t_total = _t0()

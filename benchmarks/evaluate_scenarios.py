@@ -62,6 +62,24 @@ def sample_read_delay(rng, min_seconds=0.005, max_seconds=0.25, alpha=1.4):
     """Introduce bursty but realistic inter-read spacing."""
     return max(min_seconds, min(max_seconds, sample_pareto(rng, alpha=alpha, scale=0.04, min_value=min_seconds, max_value=max_seconds)))
 
+def calculate_percentiles(lst):
+    if not lst:
+        return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+    s = sorted(lst)
+    n = len(s)
+    return {
+        "p50": s[min(n - 1, int(n * 0.50))],
+        "p95": s[min(n - 1, int(n * 0.95))],
+        "p99": s[min(n - 1, int(n * 0.99))]
+    }
+
+def calculate_jfi(values):
+    if not values or sum(values) == 0:
+        return 0.0
+    sum_val = sum(values)
+    sum_sq = sum(v * v for v in values)
+    return (sum_val ** 2) / (len(values) * sum_sq)
+
 def run_cmd(cmd, env_vars=None):
     env = os.environ.copy()
     if env_vars:
@@ -258,8 +276,14 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     
     write_latencies = []
     read_latencies = []
+    failed_writes = 0
+    failed_reads = 0
+    total_mb_written = 0
+    total_mb_read_warmup = 0
+    
     region_weights = [0.40, 0.30, 0.20, 0.10]
     
+    t_ingest_start = time.time()    
     for i in range(num_objects):
         region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
         size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=256, alpha=1.35)
@@ -275,12 +299,16 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         
         if not res:
             print(f"Failed to upload {obj_id}")
+            failed_writes += 1
             continue
             
         write_latencies.append(t1 - t0)
+        total_mb_written += size_MB
 
         # Realistic access skew: a few hot objects receive the majority of reads.
-        times = sample_read_count(rnd, min_reads=1, max_reads=100, alpha=1.18)
+        #times = sample_read_count(rnd, min_reads=1, max_reads=100, alpha=1.18)
+        # Change max_reads from 100 to something like 20
+        times = sample_read_count(rnd, min_reads=1, max_reads=20, alpha=1.18)
         if enable_kagio:
             times = int(times * 1.25)
         if enable_replicator:
@@ -300,9 +328,16 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 client.get(key=obj_id)
                 t1 = time.time()
                 read_latencies.append(t1 - t0)
+                total_mb_read_warmup += size_MB
                 time.sleep(sample_read_delay(rnd))
             except Exception as e:
                 print(f"     Read failed: {e}")
+                failed_reads += 1
+
+        # NEW: Sync KAGIO periodically so the load balancer can react
+        if enable_kagio and (i + 1) % 5 == 0:
+            print(f"  -> Intermediate KAGIO Sync after {i+1} objects...")
+            wait_for_kagio_sync(kagio_host, obj_id, times, timeout=30)
             
     if objects and enable_kagio:
         last_obj = objects[-1]
@@ -310,12 +345,21 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     elif not enable_kagio:
         time.sleep(5) # Brief wait if kagio is disabled just in case
 
+    t_ingest_end = time.time()
+    ingestion_time = t_ingest_end - t_ingest_start
+
+    print("\n--- Collecting metrics before replication ---")
+    metrics_before_repl = collect_metrics(kagio_host, enable_kagio=enable_kagio)
+    replication_time = 0.0
+
     if enable_replicator:
         print("\n--- Phase 2: Forcing automatic replication via API ---")
         try:
-            repl_resp = requests.post(f"http://{gateway_host}/replicate", timeout=30)
+            t_repl_start = time.time()
+            repl_resp = requests.post(f"http://{gateway_host}/replicate", timeout=300)
+            replication_time = round(time.time() - t_repl_start, 2)
             if repl_resp.status_code == 200:
-                print("  -> Replication cycle completed successfully.")
+                print(f"  -> Replication cycle completed successfully in {replication_time}s.")
             else:
                 print(f"  -> Replication endpoint returned status {repl_resp.status_code}.")
         except Exception as e:
@@ -330,6 +374,10 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     print(pr_before)  # Debugging output to see the PageRank values before benchmarking
 
     print("\n--- Phase 3: Benchmark Replicated Objects ---")
+    
+    benchmark_mb_read = 0
+    failed_benchmark_reads = 0
+    
     # When KAGIO is enabled, rank the hottest objects using both their observed access skew
     # and a lightweight PageRank influence, which better reflects PR-aware placement.
     def hotness_score(obj):
@@ -359,12 +407,21 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
 
         print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj['size_MB']}MB)...")
         
-        for _ in range(read_budget):
-            t0 = time.time()
-            client.get(key=obj_id)
-            t1 = time.time()
-            read_latencies.append(t1 - t0)
-            time.sleep(sample_read_delay(rnd))
+        for r_idx in range(read_budget):
+            try:
+                t0 = time.time()
+                client.get(key=obj_id)
+                t1 = time.time()
+                read_latencies.append(t1 - t0)
+                benchmark_mb_read += obj["size_MB"]
+                time.sleep(sample_read_delay(rnd))
+            except Exception as e:
+                failed_benchmark_reads += 1
+                
+            # NEW: Add barriers during benchmarking to allow PR LB to distribute reads
+            if enable_kagio and (r_idx + 1) % max(10, read_budget // 5) == 0:
+                print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{read_budget} reads...")
+                wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=15)
             
     t_end = time.time()
     perf_time = round(t_end - t_start, 2)
@@ -382,18 +439,63 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio)
     
     # Calculate PageRank variation
+    requests_list = []
     for dc, data in metrics.items():
+        requests_list.append(data.get("requests_attended", 0))
         data["pagerank_before"] = pr_before.get(dc, 0.0)
         data["pagerank_after"] = data.pop("pagerank")  # Rename for clarity
         data["pagerank_variation"] = data["pagerank_after"] - data["pagerank_before"]
+        
+    import statistics
+    mean_req = statistics.mean(requests_list) if requests_list else 0
+    std_req = statistics.stdev(requests_list) if len(requests_list) > 1 else 0
+    max_req = max(requests_list) if requests_list else 0
+    jfi_req = calculate_jfi(requests_list)
     
+    # Replication overhead
+    repl_storage_overhead_mb = 0
+    repl_objects_overhead = 0
+    if enable_replicator:
+        for dc, data in metrics.items():
+            before_data = metrics_before_repl.get(dc, {})
+            repl_storage_overhead_mb += (data.get("storage_MB", 0) - before_data.get("storage_MB", 0))
+            repl_objects_overhead += (data.get("objects_count", 0) - before_data.get("objects_count", 0))
+
+    read_throughput_mb_s = round(benchmark_mb_read / max(perf_time, 0.001), 2)
+    write_throughput_mb_s = round(total_mb_written / max(ingestion_time, 0.001), 2)
+    
+    read_percentiles = calculate_percentiles(read_latencies)
+    write_percentiles = calculate_percentiles(write_latencies)
+
     result = {
         "scenario": scenario_name,
         "performance_time_seconds": perf_time,
+        "throughput": {
+            "read_throughput_mb_s": read_throughput_mb_s,
+            "write_throughput_mb_s": write_throughput_mb_s
+        },
+        "errors": {
+            "failed_writes": failed_writes,
+            "failed_reads_warmup": failed_reads,
+            "failed_reads_benchmark": failed_benchmark_reads
+        },
+        "replication_stats": {
+            "replication_time_seconds": replication_time,
+            "storage_overhead_mb": round(repl_storage_overhead_mb, 2),
+            "objects_overhead": repl_objects_overhead
+        },
+        "cluster_stats": {
+            "max_requests_attended": max_req,
+            "mean_requests_attended": round(mean_req, 2),
+            "stddev_requests_attended": round(std_req, 2),
+            "jains_fairness_index": round(jfi_req, 4)
+        },
         "container_metrics": metrics,
         "user_latencies": {
             "write_latencies_seconds": write_latencies,
-            "read_latencies_seconds": read_latencies
+            "read_latencies_seconds": read_latencies,
+            "read_percentiles": read_percentiles,
+            "write_percentiles": write_percentiles
         }
     }
     
@@ -414,12 +516,12 @@ def main():
     # Load existing results to update them instead of wiping if only running specific tests
     report_file = "evaluation_report.json"
     existing_results = []
-    if os.path.exists(report_file):
-        try:
-            with open(report_file, 'r') as f:
-                existing_results = json.load(f)
-        except Exception:
-            pass
+    #if os.path.exists(report_file):
+    #    try:
+    #        with open(report_file, 'r') as f:
+    #            existing_results = json.load(f)
+    #    except Exception:
+    #        pass
             
     tests_to_run = [t.strip() for t in args.test.split(',')]
     new_results = []

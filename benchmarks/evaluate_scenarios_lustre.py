@@ -20,6 +20,24 @@ def run_cmd(cmd, env_vars=None):
         env.update(env_vars)
     subprocess.run(cmd, shell=True, env=env, check=True)
 
+def calculate_percentiles(lst):
+    if not lst:
+        return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+    s = sorted(lst)
+    n = len(s)
+    return {
+        "p50": s[min(n - 1, int(n * 0.50))],
+        "p95": s[min(n - 1, int(n * 0.95))],
+        "p99": s[min(n - 1, int(n * 0.99))]
+    }
+
+def calculate_jfi(values):
+    if not values or sum(values) == 0:
+        return 0.0
+    sum_val = sum(values)
+    sum_sq = sum(v * v for v in values)
+    return (sum_val ** 2) / (len(values) * sum_sq)
+
 def clean_system():
     print("Cleaning system (Monitor API)...")
     try:
@@ -193,7 +211,12 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     
     write_latencies = []
     read_latencies = []
+    failed_writes = 0
+    failed_reads = 0
+    total_mb_written = 0
+    total_mb_read_warmup = 0
     
+    t_ingest_start = time.time()    
     for i in range(num_objects):
         region = rnd.choice(client_regions)
         size_MB = rnd.randint(10, 50) # smaller size for faster evals
@@ -209,9 +232,11 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         
         if not res:
             print(f"Failed to upload {obj_id}")
+            failed_writes += 1
             continue
             
         write_latencies.append(t1 - t0)
+        total_mb_written += size_MB
 
         # Target indegree based on a Pareto distribution (alpha=1.16 for ~80/20 rule)
         # Using a base scale and capping it to avoid infinite test times
@@ -231,9 +256,11 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 client.get(key=obj_id)
                 t1 = time.time()
                 read_latencies.append(t1 - t0)
+                total_mb_read_warmup += size_MB
                 time.sleep(0.05) # Prevent overloading with continuous bursts
             except Exception as e:
                 print(f"     Read failed: {e}")
+                failed_reads += 1
             
     if enable_replicator:
         wait_time = 45
@@ -248,6 +275,13 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     elif not enable_kagio:
         time.sleep(5) # Brief wait if kagio is disabled just in case
 
+    t_ingest_end = time.time()
+    ingestion_time = t_ingest_end - t_ingest_start
+
+    print("\n--- Collecting metrics before replication ---")
+    metrics_before_repl = collect_metrics(kagio_host)
+    replication_time = wait_time if enable_replicator else 0.0
+
     print("\n--- Collecting PageRanks before benchmark ---")
     pr_before = get_pageranks(kagio_host)
 
@@ -259,16 +293,23 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     
     print(f"Targeting top {top_25_count} objects...")
     
+    benchmark_mb_read = 0
+    failed_benchmark_reads = 0
+    
     t_start = time.time()
     for idx, obj in enumerate(top_25):
         obj_id = obj["id"]
         print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({benchmark_reads} reads)...")
         
         for _ in range(benchmark_reads):
-            t0 = time.time()
-            client.get(key=obj_id)
-            t1 = time.time()
-            read_latencies.append(t1 - t0)
+            try:
+                t0 = time.time()
+                client.get(key=obj_id)
+                t1 = time.time()
+                read_latencies.append(t1 - t0)
+                benchmark_mb_read += obj.get("size_MB", 30) # Average size if not saved
+            except Exception as e:
+                failed_benchmark_reads += 1
             
     t_end = time.time()
     perf_time = round(t_end - t_start, 2)
@@ -285,19 +326,64 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     print("\n--- Phase 4: Collecting Metrics ---")
     metrics = collect_metrics(kagio_host)
     
-    # Calculate PageRank variation
+    # Calculate PageRank variation and metrics
+    requests_list = []
     for dc, data in metrics.items():
+        requests_list.append(data.get("requests_attended", 0))
         data["pagerank_before"] = pr_before.get(dc, 0.0)
-        data["pagerank_after"] = data.pop("pagerank")  # Rename for clarity
+        data["pagerank_after"] = data.pop("pagerank", 0.0)
         data["pagerank_variation"] = data["pagerank_after"] - data["pagerank_before"]
+        
+    import statistics
+    mean_req = statistics.mean(requests_list) if requests_list else 0
+    std_req = statistics.stdev(requests_list) if len(requests_list) > 1 else 0
+    max_req = max(requests_list) if requests_list else 0
+    jfi_req = calculate_jfi(requests_list)
+
+    # Replication overhead
+    repl_storage_overhead_mb = 0
+    repl_objects_overhead = 0
+    if enable_replicator:
+        for dc, data in metrics.items():
+            before_data = metrics_before_repl.get(dc, {})
+            repl_storage_overhead_mb += (data.get("storage_MB", 0) - before_data.get("storage_MB", 0))
+            repl_objects_overhead += (data.get("objects_count", 0) - before_data.get("objects_count", 0))
+
+    read_throughput_mb_s = round(benchmark_mb_read / max(perf_time, 0.001), 2)
+    write_throughput_mb_s = round(total_mb_written / max(ingestion_time, 0.001), 2)
     
+    read_percentiles = calculate_percentiles(read_latencies)
+    write_percentiles = calculate_percentiles(write_latencies)
+
     result = {
         "scenario": scenario_name,
         "performance_time_seconds": perf_time,
+        "throughput": {
+            "read_throughput_mb_s": read_throughput_mb_s,
+            "write_throughput_mb_s": write_throughput_mb_s
+        },
+        "errors": {
+            "failed_writes": failed_writes,
+            "failed_reads_warmup": failed_reads,
+            "failed_reads_benchmark": failed_benchmark_reads
+        },
+        "replication_stats": {
+            "replication_time_seconds": replication_time,
+            "storage_overhead_mb": round(repl_storage_overhead_mb, 2),
+            "objects_overhead": repl_objects_overhead
+        },
+        "cluster_stats": {
+            "max_requests_attended": max_req,
+            "mean_requests_attended": round(mean_req, 2),
+            "stddev_requests_attended": round(std_req, 2),
+            "jains_fairness_index": round(jfi_req, 4)
+        },
         "container_metrics": metrics,
         "user_latencies": {
             "write_latencies_seconds": write_latencies,
-            "read_latencies_seconds": read_latencies
+            "read_latencies_seconds": read_latencies,
+            "read_percentiles": read_percentiles,
+            "write_percentiles": write_percentiles
         }
     }
     

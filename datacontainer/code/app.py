@@ -3,7 +3,7 @@
 import os
 import sys
 import logging
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, stream_with_context
 import requests
 from werkzeug.utils import secure_filename
 from logging.handlers import RotatingFileHandler
@@ -19,7 +19,7 @@ class ISO8601UTCFormatter(logging.Formatter):
         return dt.isoformat(timespec="milliseconds")  # 2025-09-10T14:47:10.114+00:00
 
 DATA_CONTAINEER_ID = os.getenv("DATA_CONTAINER_ID")
-DC_NAME = f"DATACONTAINER_{DATA_CONTAINEER_ID}"
+DC_NAME = f"datacontainer_{DATA_CONTAINEER_ID}"
 
 # ----- logging (safe default; won't double-configure if app sets handlers) -----
 LOG_DIR = os.getenv("LOG_DIR", "./logs")
@@ -48,10 +48,10 @@ fh.setFormatter(ISO8601UTCFormatter(fmt_str))  # <-- was ch.setFormatter(...)
 root.addHandler(fh)
 
 # If make_csv_logger creates its own logger, ensure it propagates or give it no handlers:
-csv_log = logging.getLogger(__name__)
+csv_log = logging.getLogger(f"dynostore.{__name__}")
 csv_log.propagate = True  # so it uses root's handlers/formatters
 
-_log = make_csv_logger(DC_NAME, __name__) 
+_log = make_csv_logger(DC_NAME, f"dynostore.{__name__}") 
 
 # ------------------------------------------------------------------------------
 
@@ -77,9 +77,8 @@ def health():
 def upload_object(objectkey, tokenuser):
     if request.method == 'PUT':
         try:
-            bytes_ = request.data or b""
-            res = storage.put(objectkey, bytes_)
-            _log("UPLOAD", objectkey, "END", "SUCCESS", f"bytes={len(bytes_)}", level="info")
+            res = storage.put_stream(objectkey, request.stream)
+            _log("UPLOAD", objectkey, "END", "SUCCESS", f"bytes={res.get('bytes', 0)};", level="info")
             return jsonify({"message": "Data successfully uploaded", "data": res}), 201
         except Exception as e:
             _log("UPLOAD", objectkey, "END", "ERROR", f"msg={e};status=500", level="error")
@@ -94,9 +93,9 @@ def download_object(objectkey, tokenuser):
     _log("DOWNLOAD", objectkey, "START", "RUN", f"user={tokenuser}")
     if request.method == 'GET':
         try:
-            data = storage.get(objectkey)
-            _log("DOWNLOAD", objectkey, "END", "SUCCESS", f"bytes={len(data)};status=200", level="info")
-            return data, 200
+            generator = storage.get_stream(objectkey)
+            _log("DOWNLOAD", objectkey, "END", "SUCCESS", f"status=200", level="info")
+            return Response(stream_with_context(generator)), 200
         except Exception as e:
             _log("DOWNLOAD", objectkey, "END", "ERROR", f"msg={e};status=500", level="error")
             return jsonify({"error": f"Error downloading data. Exception {e}"}), 500

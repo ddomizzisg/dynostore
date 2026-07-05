@@ -5,10 +5,10 @@ import os
 import time
 
 DATA_CONTAINEER_ID = os.getenv("DATA_CONTAINER_ID")
-DC_NAME = f"DATACONTAINER_{DATA_CONTAINEER_ID}"
+DC_NAME = f"datacontainer_{DATA_CONTAINEER_ID}"
 
 # ----- logging: prefix Status with MEM_ for memory-layer logs -----
-_base_log = make_csv_logger(DC_NAME, __name__)
+_base_log = make_csv_logger(DC_NAME, f"dynostore.{__name__}")
 
 
 def _log(operation: str, key: str, phase: str, status: str, msg: str = ""):
@@ -131,13 +131,12 @@ class LRUCacheStorage:
         evict_time_ms = 0.0
         disk_write_time_ms = 0.0
 
-        
-        if self.utilization >= self.capacity:
+        while self.utilization + size > self.capacity and self.head.next != self.tail:
             t_ev = _t0()
             _log("PUT", key, "START", "EVICT_REQUIRED",
                     f"utilization={self.utilization};capacity={self.capacity}")
             self._evict()
-            evict_time_ms = _ms_since(t_ev)
+            evict_time_ms += _ms_since(t_ev)
 
         node = Node(key, value)
         self.cache[key] = node
@@ -148,7 +147,7 @@ class LRUCacheStorage:
 
         self.utilization += size
 
-        _log("PUT", key, "END", "MEM_SUCCESS",
+        _log("PUT", key, "END", "SUCCESS",
                 f"utilization={self.utilization};add_time_ms={add_time_ms:.3f};"
                 f"evict_time_ms={evict_time_ms:.3f};total_time_ms={_ms_since(t_total):.3f}")
 
@@ -174,8 +173,32 @@ class LRUCacheStorage:
         }
         return result
 
-            
-            
+    def get_stream(self, key):
+        t_total = _t0()
+        _log("GET_STREAM", key, "START", "RUN", "")
+        # We bypass the memory cache and stream directly from the filesystem
+        try:
+            generator = self.filesystem.read_stream(key)
+            _log("GET_STREAM", key, "END", "SUCCESS", f"source=disk;total_time_ms={_ms_since(t_total):.3f}")
+            return generator
+        except Exception as e:
+            _log("GET_STREAM", key, "END", "ERROR", f"msg={e};total_time_ms={_ms_since(t_total):.3f}")
+            raise Exception("Error reading stream from disk. Exception " + str(e))
+
+    def put_stream(self, key, stream):
+        t_total = _t0()
+        # For streams, we bypass the memory cache to avoid OOM
+        try:
+            res = self.filesystem.write_stream(key, stream)
+            _log("PUT", key, "END", "SUCCESS", 
+                 f"utilization={self.utilization};add_time_ms=0.000;"
+                 f"evict_time_ms=0.000;total_time_ms={_ms_since(t_total):.3f}")
+            return res
+        except Exception as e:
+            _log("PUT", key, "END", "ERROR", f"msg={e}")
+            raise Exception("Error writing stream to disk. Exception " + str(e))
+
+
 
     def _move_to_front(self, node):
         self._remove_node(node)
