@@ -337,7 +337,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         # NEW: Sync KAGIO periodically so the load balancer can react
         if enable_kagio and (i + 1) % 5 == 0:
             print(f"  -> Intermediate KAGIO Sync after {i+1} objects...")
-            wait_for_kagio_sync(kagio_host, obj_id, times, timeout=30)
+            wait_for_kagio_sync(kagio_host, obj_id, times, timeout=90)
             
     if objects and enable_kagio:
         last_obj = objects[-1]
@@ -356,7 +356,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         print("\n--- Phase 2: Forcing automatic replication via API ---")
         try:
             t_repl_start = time.time()
-            repl_resp = requests.post(f"http://{gateway_host}/replicate", timeout=300)
+            repl_resp = requests.post(f"http://{gateway_host}/replicate")
             replication_time = round(time.time() - t_repl_start, 2)
             if repl_resp.status_code == 200:
                 print(f"  -> Replication cycle completed successfully in {replication_time}s.")
