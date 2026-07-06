@@ -24,7 +24,12 @@ export default function Register() {
         const data = await response.json();
         if (response.ok && data.data && data.data.length > 0) {
           setOrganizations(data.data);
-          setTokenorg(data.data[0].tokenorg);
+          const dynoOrg = data.data.find(org => org.fullname === 'Dynostore' || org.acronym === 'DYNO');
+          if (dynoOrg) {
+            setTokenorg(dynoOrg.tokenorg);
+          } else {
+            setTokenorg(data.data[0].tokenorg);
+          }
         } else {
           console.error("Failed to fetch organizations:", data);
         }

@@ -496,6 +496,39 @@ async def clean(admintoken):
 async def health():
     return jsonify({"status": "ok"}), 200
 
+@app.before_serving
+async def initialize_default_organization():
+    import asyncio
+    
+    async def create_org():
+        # Give services a moment to start
+        await asyncio.sleep(5)
+        try:
+            # Check if any organizations exist
+            url_service = f'http://{AUTH_HOST}/auth/v1/hierarchy/all/'
+            results = requests.get(url_service)
+            if results.status_code == 200:
+                data = results.json()
+                orgs = data.get("data", [])
+                
+                dynostore_exists = any(org.get("fullname") == "Dynostore" or org.get("acronym") == "DYNO" for org in orgs)
+                
+                if not dynostore_exists:
+                    # Dynostore doesn't exist, create it
+                    print("Dynostore organization not found, creating default organization 'Dynostore'...", flush=True)
+                    create_url = f'http://{AUTH_HOST}/auth/v1/hierarchy'
+                    payload = {"option": "NEW", "fullname": "Dynostore", "acronym": "DYNO"}
+                    create_res = requests.post(create_url, json=payload)
+                    if create_res.status_code == 200:
+                        print("Default organization 'Dynostore' created successfully.", flush=True)
+                    else:
+                        print(f"Failed to create default organization: {create_res.text}", flush=True)
+        except Exception as e:
+            print(f"Error during default organization initialization: {e}", flush=True)
+
+    # Run as a background task to not block server startup
+    asyncio.create_task(create_org())
+
 if __name__ == "__main__":
     import hypercorn.asyncio
     config = Config()
