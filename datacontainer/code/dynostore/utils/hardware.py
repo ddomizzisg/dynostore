@@ -5,12 +5,8 @@ import os
 def get_default_partition_size():
     """Get the size of the default partition where the program is running."""
     current_directory = os.getcwd()
-    partition = psutil.disk_partitions(all=False)
-    for part in partition:
-        if current_directory.startswith(part.mountpoint):
-            partition_usage = psutil.disk_usage(part.mountpoint)
-            return partition_usage.total
-    return None
+    partition_usage = psutil.disk_usage(current_directory)
+    return partition_usage.total
 
 
 def get_total_memory():
