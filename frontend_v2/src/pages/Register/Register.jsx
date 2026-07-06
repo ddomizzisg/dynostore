@@ -22,8 +22,9 @@ export default function Register() {
       try {
         const response = await fetch('/api/auth/organization');
         const data = await response.json();
-        if (response.ok && data.data) {
+        if (response.ok && data.data && data.data.length > 0) {
           setOrganizations(data.data);
+          setTokenorg(data.data[0].tokenorg);
         } else {
           console.error("Failed to fetch organizations:", data);
         }
@@ -128,25 +129,7 @@ export default function Register() {
             </div>
           </div>
 
-          <div className="form-group">
-            <label className="form-label">Organization</label>
-            <div className="input-with-icon">
-              <Building size={18} className="input-icon" />
-              <select 
-                className="form-control select-dropdown" 
-                value={tokenorg}
-                onChange={(e) => setTokenorg(e.target.value)}
-                required
-              >
-                <option value="" disabled>Select an organization</option>
-                {organizations.map((org) => (
-                  <option key={org.tokenorg} value={org.tokenorg}>
-                    {org.fullname || org.acronym || 'Unnamed Organization'}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
+
 
           <div className="form-group">
             <label className="form-label">Password</label>
