@@ -517,7 +517,7 @@ async def initialize_default_organization():
                     # Dynostore doesn't exist, create it
                     print("Dynostore organization not found, creating default organization 'Dynostore'...", flush=True)
                     create_url = f'http://{AUTH_HOST}/auth/v1/hierarchy'
-                    payload = {"option": "NEW", "fullname": "Dynostore", "acronym": "DYNO"}
+                    payload = {"option": "NEW", "fullname": "Dynostore", "acronym": "DYNO", "fathers_token": "/"}
                     create_res = requests.post(create_url, json=payload)
                     if create_res.status_code == 200:
                         print("Default organization 'Dynostore' created successfully.", flush=True)
