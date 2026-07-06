@@ -507,8 +507,10 @@ async def initialize_default_organization():
             # Check if any organizations exist
             url_service = f'http://{AUTH_HOST}/auth/v1/hierarchy/all/'
             results = requests.get(url_service)
-            if results.status_code == 200:
-                data = results.json()
+            
+            # 404 means "No data" (0 organizations) in the auth service
+            if results.status_code == 200 or results.status_code == 404:
+                data = results.json() if results.status_code == 200 else {}
                 orgs = data.get("data", [])
                 
                 dynostore_exists = any(org.get("fullname") == "Dynostore" or org.get("acronym") == "DYNO" for org in orgs)
