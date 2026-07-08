@@ -114,7 +114,7 @@ def clean_system(runner="apptainer"):
                 run_cmd(f"rm -rf {logs_dir}/*")
         except Exception as e:
             print(f"Error clearing logs: {e}")
-            
+
     for i in range(1, 11):
         obj_dir = os.path.join(base_dir, "datacontainer", f"objects{i}")
         if os.path.exists(obj_dir):
@@ -125,6 +125,14 @@ def clean_system(runner="apptainer"):
                     run_cmd(f"rm -rf {obj_dir}/*")
             except Exception as e:
                 print(f"Error clearing objects{i}: {e}")
+                
+    # Reset internal metrics database in each container API
+    print("Resetting internal metrics via APIGateway...")
+    gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
+    try:
+        requests.post(f"http://{gateway_host}/metrics/reset", timeout=5)
+    except Exception as e:
+        print(f"Failed to reset metrics: {e}")
 
 def restart_cluster(enable_kagio, enable_replicator, build_containers=False, runner="apptainer"):
     print(f"\n---> Restarting Cluster: KAGIO={enable_kagio}, REPLICATOR={enable_replicator}, RUNNER={runner} <---")
@@ -195,37 +203,22 @@ def get_pageranks(kagio_host):
     return {}
 
 def collect_metrics(kagio_host, enable_kagio=False):
+    gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
     metrics = {}
+    try:
+        resp = requests.get(f"http://{gateway_host}/metrics", timeout=5)
+        if resp.status_code == 200:
+            metrics = resp.json()
+        else:
+            print(f"Error: APIGateway returned {resp.status_code} for metrics")
+    except Exception as e:
+        print(f"Error connecting to APIGateway metrics API: {e}")
+        
+    # Ensure all 10 containers are present in the dictionary
     for i in range(1, 11):
         dc_name = f"datacontainer{i}"
-        
-        # 1. Requests
-        log_file = f"../datacontainer/code/logs/datacontainer-{i}.log"
-        requests_count = 0
-        if os.path.exists(log_file):
-            with open(log_file) as f:
-                content = f.read()
-                requests_count = sum(1 for line in content.split('\n') if "DOWNLOAD" in line and "SUCCESS" in line)
-                
-        # 2. Storage & Objects
-        obj_dir = f"../datacontainer/objects{i}/"
-        obj_count = 0
-        total_size = 0
-        if os.path.exists(obj_dir):
-            for root, dirs, files in os.walk(obj_dir):
-                for f in files:
-                    if f == ".gitkeep":
-                        continue
-                    fp = os.path.join(root, f)
-                    if os.path.isfile(fp):
-                        obj_count += 1
-                        total_size += os.path.getsize(fp)
-                        
-        metrics[dc_name] = {
-            "requests_attended": requests_count,
-            "objects_count": obj_count,
-            "storage_MB": round(total_size / (1024 * 1024), 2)
-        }
+        if dc_name not in metrics:
+            metrics[dc_name] = {"requests_attended": 0, "objects_count": 0, "storage_MB": 0.0}
         
     # 3. PageRanks
     pageranks = get_pageranks(kagio_host) #if enable_kagio else {}
@@ -256,7 +249,32 @@ def wait_for_kagio_sync(kagio_host, target_obj_id, target_indegree, timeout=60):
     print("  -> Warning: KAGIO sync timed out. Proceeding anyway.")
     return False
 
-def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False, runner="apptainer"):
+def wait_for_all_kagio_sync(kagio_host, targets, timeout=60):
+    print(f"--- Waiting for KAGIO to sync {len(targets)} objects ---")
+    start_time = time.time()
+    url = f"{kagio_host}/metadata/indegree"
+    while time.time() - start_time < timeout:
+        try:
+            resp = requests.get(url, timeout=2)
+            if resp.status_code == 200:
+                data = resp.json()
+                satisfied = 0
+                for obj_id, target_indegree in targets.items():
+                    for item in data:
+                        if obj_id in item.get("metadata_id", ""):
+                            if item.get("indegree", 0) >= target_indegree:
+                                satisfied += 1
+                            break
+                if satisfied == len(targets):
+                    print(f"  -> All {len(targets)} objects synced in {round(time.time() - start_time, 2)} seconds!")
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    print("  -> Warning: KAGIO sync timed out for some objects. Proceeding anyway.")
+    return False
+
+def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False, runner="apptainer", seed=42, max_size_mb=64, max_warmup_reads=20, delay_factor=1.0, kagio_timeout=90, skip_barriers=False):
     print(f"\n=======================================================")
     print(f" RUNNING SCENARIO: {scenario_name}")
     print(f"=======================================================")
@@ -268,7 +286,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     kagio_host = os.getenv("KAGIO_HOST", "http://localhost:8080")
     catalog_name = "eval_catalog"
     client = Client(gateway_host)
-    rnd = random.Random(42) # Deterministic workload
+    rnd = random.Random(seed) # Deterministic workload
     client_regions = ["eu-west", "us-east", "us-west", "ap-south"]
     
     print("\n--- Phase 1: Ingestion & Indegree Generation ---")
@@ -286,7 +304,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     t_ingest_start = time.time()    
     for i in range(num_objects):
         region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
-        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=256, alpha=1.35)
+        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=max_size_mb, alpha=1.35)
         size_B = size_MB * 1024**2
         obj_id = str(uuid.uuid4())
         
@@ -306,9 +324,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
         total_mb_written += size_MB
 
         # Realistic access skew: a few hot objects receive the majority of reads.
-        #times = sample_read_count(rnd, min_reads=1, max_reads=100, alpha=1.18)
-        # Change max_reads from 100 to something like 20
-        times = sample_read_count(rnd, min_reads=1, max_reads=20, alpha=1.18)
+        times = sample_read_count(rnd, min_reads=1, max_reads=max_warmup_reads, alpha=1.18)
         if enable_kagio:
             times = int(times * 1.25)
         if enable_replicator:
@@ -329,21 +345,22 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 t1 = time.time()
                 read_latencies.append(t1 - t0)
                 total_mb_read_warmup += size_MB
-                time.sleep(sample_read_delay(rnd))
+                time.sleep(sample_read_delay(rnd) * delay_factor)
             except Exception as e:
                 print(f"     Read failed: {e}")
                 failed_reads += 1
 
         # NEW: Sync KAGIO periodically so the load balancer can react
-        if enable_kagio and (i + 1) % 5 == 0:
+        if enable_kagio and not skip_barriers and (i + 1) % 5 == 0:
             print(f"  -> Intermediate KAGIO Sync after {i+1} objects...")
-            wait_for_kagio_sync(kagio_host, obj_id, times, timeout=90)
+            wait_for_kagio_sync(kagio_host, obj_id, times, timeout=kagio_timeout)
             
     if objects and enable_kagio:
-        last_obj = objects[-1]
-        wait_for_kagio_sync(kagio_host, last_obj["id"], last_obj["reads"])
+        print("\n  -> Final Phase 1 barrier: waiting for ALL objects to sync...")
+        targets = {obj["id"]: obj["reads"] for obj in objects}
+        wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
     elif not enable_kagio:
-        time.sleep(5) # Brief wait if kagio is disabled just in case
+        time.sleep(5 * delay_factor) # Brief wait if kagio is disabled just in case
 
     t_ingest_end = time.time()
     ingestion_time = t_ingest_end - t_ingest_start
@@ -364,7 +381,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 print(f"  -> Replication endpoint returned status {repl_resp.status_code}.")
         except Exception as e:
             print(f"  -> Failed to force replication: {e}")
-        time.sleep(5) # Small buffer after replication
+        time.sleep(5 * delay_factor) # Small buffer after replication
     else:
         print("\n--- Phase 2: Replication disabled, skipping ---")
 
@@ -396,6 +413,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     print(f"Targeting top {top_25_count} objects with a Pareto-heavy read pattern...")
     
     t_start = time.time()
+    last_bench_reads = 0
     for idx, obj in enumerate(top_25):
         obj_id = obj["id"]
         base_budget = max(benchmark_reads, 1)
@@ -404,6 +422,9 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
             read_budget = int(read_budget * 1.15)
         if enable_replicator:
             read_budget = int(read_budget * 1.10)
+            
+        last_bench_reads = read_budget
+        obj["benchmark_reads"] = read_budget
 
         print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj['size_MB']}MB)...")
         
@@ -414,26 +435,25 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 t1 = time.time()
                 read_latencies.append(t1 - t0)
                 benchmark_mb_read += obj["size_MB"]
-                time.sleep(sample_read_delay(rnd))
+                time.sleep(sample_read_delay(rnd) * delay_factor)
             except Exception as e:
                 failed_benchmark_reads += 1
                 
             # NEW: Add barriers during benchmarking to allow PR LB to distribute reads
-            if enable_kagio and (r_idx + 1) % max(10, read_budget // 5) == 0:
+            if enable_kagio and not skip_barriers and (r_idx + 1) % max(10, read_budget // 5) == 0:
                 print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{read_budget} reads...")
-                wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=15)
+                wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=max(5, int(15 * delay_factor)))
             
     t_end = time.time()
     perf_time = round(t_end - t_start, 2)
     print(f"\nBenchmark Performance Time: {perf_time} seconds")
     
     if top_25 and enable_kagio:
-        last_bench_obj = top_25[-1]
-        # Total expected indegree is baseline reads + benchmark reads
-        expected_indegree = last_bench_obj["reads"] + benchmark_reads
-        wait_for_kagio_sync(kagio_host, last_bench_obj["id"], expected_indegree)
+        print(f"  -> Final Phase 3 PR barrier: waiting for KAGIO to catch up on ALL benchmark reads...")
+        targets = {obj["id"]: obj["reads"] + obj["benchmark_reads"] for obj in top_25}
+        wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
     elif not enable_kagio:
-        time.sleep(5)
+        time.sleep(5 * delay_factor)
     
     print("\n--- Phase 4: Collecting Metrics ---")
     metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio)
@@ -511,6 +531,13 @@ def main():
     parser.add_argument("--benchmark-reads", type=int, default=5, help="Number of reads per benchmarked object")
     parser.add_argument("--build", action="store_true", help="Rebuild docker containers when restarting the cluster")
     parser.add_argument("--runner", type=str, choices=["apptainer", "docker"], default="apptainer", help="Runner to deploy the cluster: apptainer or docker")
+    parser.add_argument("--save-interim", action="store_true", help="Store intermediary results to evaluation_report_interim.json after each scenario or on failure")
+    parser.add_argument("--skip-barriers", action="store_true", help="Skip intermediate KAGIO sync barriers during ingestion and benchmarking phases")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic workloads")
+    parser.add_argument("--max-size-mb", type=int, default=64, help="Maximum object size in MB for ingestion")
+    parser.add_argument("--max-warmup-reads", type=int, default=20, help="Maximum warmup reads per object")
+    parser.add_argument("--delay-factor", type=float, default=1.0, help="Multiplier for read delays and artificial sleeps")
+    parser.add_argument("--kagio-timeout", type=int, default=90, help="Maximum wait time in seconds for KAGIO sync barriers")
     args = parser.parse_args()
     
     # Load existing results to update them instead of wiping if only running specific tests
@@ -534,32 +561,57 @@ def main():
             return True
         return False
     
-    if "all" in tests_to_run or "1" in tests_to_run:
-        res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio=False, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
-        new_results.append(res)
-        
-    if "all" in tests_to_run or "2" in tests_to_run:
-        res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio=True, enable_replicator=False, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
-        new_results.append(res)
-        
-    if "all" in tests_to_run or "3" in tests_to_run:
-        res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio=True, enable_replicator=True, num_objects=args.num_objects, benchmark_reads=args.benchmark_reads, build_containers=should_build(), runner=args.runner)
-        new_results.append(res)
-        
-    # Merge results
-    final_results = []
-    for er in existing_results:
-        # Keep existing if it wasn't just re-run
-        if not any(nr["scenario"] == er["scenario"] for nr in new_results):
-            final_results.append(er)
-    final_results.extend(new_results)
+    kwargs = {
+        "num_objects": args.num_objects,
+        "benchmark_reads": args.benchmark_reads,
+        "runner": args.runner,
+        "seed": args.seed,
+        "max_size_mb": args.max_size_mb,
+        "max_warmup_reads": args.max_warmup_reads,
+        "delay_factor": args.delay_factor,
+        "kagio_timeout": args.kagio_timeout,
+        "skip_barriers": args.skip_barriers
+    }
+
+    def save_results(target_file, is_interim=False):
+        final_results = []
+        for er in existing_results:
+            if not any(nr["scenario"] == er["scenario"] for nr in new_results):
+                final_results.append(er)
+        final_results.extend(new_results)
+        with open(target_file, "w") as f:
+            json.dump(final_results, f, indent=2)
+        if not is_interim:
+            print(f"Report saved to {target_file}")
+        elif is_interim:
+            print(f"Interim report saved to {target_file}")
+
+    try:
+        if "all" in tests_to_run or "1" in tests_to_run:
+            res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio=False, enable_replicator=False, build_containers=should_build(), **kwargs)
+            new_results.append(res)
+            if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
+            
+        if "all" in tests_to_run or "2" in tests_to_run:
+            res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio=True, enable_replicator=False, build_containers=should_build(), **kwargs)
+            new_results.append(res)
+            if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
+            
+        if "all" in tests_to_run or "3" in tests_to_run:
+            res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio=True, enable_replicator=True, build_containers=should_build(), **kwargs)
+            new_results.append(res)
+            if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
+    except Exception as e:
+        print(f"\n[!] Critical evaluation error: {e}")
+        if args.save_interim and new_results:
+            print("Saving intermediary results gathered before the crash...")
+            save_results("evaluation_report_interim.json", is_interim=True)
+        raise
 
     print("\n=======================================================")
     print(" EVALUATION COMPLETE")
     print("=======================================================")
-    with open(report_file, "w") as f:
-        json.dump(final_results, f, indent=2)
-    print(f"Report saved to {report_file}")
+    save_results(report_file)
 
 if __name__ == "__main__":
     main()

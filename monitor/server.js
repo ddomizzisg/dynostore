@@ -232,7 +232,7 @@ app.post('/api/cleanup/metadata', async (req, res) => {
                 await execInContainer(container, ['sh', '-c', 'psql -U muyalmanager -d pub_sub -c "DELETE FROM groups_files; DELETE FROM shared_files; DELETE FROM catalogs_files; DELETE FROM users_files;"']);
             } else if (service === 'db_metadata') {
                 // Delete files and cascade chunks, preserve servers
-                await execInContainer(container, ['sh', '-c', 'mysql -u metadata -pmetadata2023 metadata-api -e "DELETE FROM chunks; DELETE FROM abekeys; DELETE FROM files_in_servers; DELETE FROM files;"']);
+                await execInContainer(container, ['sh', '-c', 'psql -U metadata -d metadata-api -c "DELETE FROM chunks; DELETE FROM abekeys; DELETE FROM files_in_servers; DELETE FROM files;"']);
             }
         }
         

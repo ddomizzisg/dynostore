@@ -36,7 +36,7 @@ def get_kagio_pageranks() -> dict:
         ranks = kagio_client.centrality.data_containers_page_rank()
         for entry in ranks:
             try:
-                dc_id = int(str(entry["id"]).replace("datacontainer-", "").replace("dc-", "")) + 1
+                dc_id = int(str(entry["id"]).replace("datacontainer-", "").replace("datacontainer", "").replace("dc-", ""))
                 print(f"Data container ID: {dc_id}, PageRank: {entry['pagerank']}", flush=True)  # Debugging output to see the data container ID and its PageRank
                 pr_map[dc_id] = float(entry["pagerank"])
             except Exception:
@@ -51,6 +51,8 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
         storage = float(node.get("storage", 1.0)) or 1.0
         node["uf"] = 1.0 - float((storage - (used + file_size)) / storage)
 
+    print(f"Nodes with UF values: {nodes}", flush=True)  # Debugging output to see the UF values before sorting
+
     # Simulator weights
     pr_weight = 0.75
     uf_weight = 0.25
@@ -59,6 +61,7 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
     w_pr_default = pr_weight / total_w
 
     print(f"Sorting nodes with weights: uf={w_uf_default}, pr={w_pr_default}", flush=True)
+    print("KAGIO enabled:", os.getenv("ENABLE_KAGIO", "true").lower() == "true", flush=True)
 
     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
         # Fetch PR from KAGIO
@@ -127,6 +130,8 @@ def allocate_ida(db: Session, file_model, nodes: list[dict], token_user: str, us
         chunk_name = f"c{i}_{file_model.name}"
         keychunk = str(uuid.uuid4())
         node = nodes[i - 1]
+
+        print(f"Allocating chunk {chunk_name} to node {node['id']} with URL {node['url']} UF: {node['uf']} Used: {node['used']}", flush=True)  # Debugging output to see which chunk is allocated to which node
         
         chunk = Chunk(
             name=chunk_name,
@@ -170,7 +175,7 @@ def locate_single(db: Session, token_user: str, file_model):
         result.append({"route": f"{srv.url}/objects/{file_model.keyfile}/{token_user}"})
     return result
 
-async def locate_ida(db: Session, token_user: str, file_model):
+async def locate_ida(db: Session, token_user: str, file_model, all_chunks: bool = False):
     number_chunks = file_model.chunks
     required_chunks = file_model.required_chunks
     
@@ -196,7 +201,7 @@ async def locate_ida(db: Session, token_user: str, file_model):
         # We need to iterate over chunks and find `required_chunks` healthy servers
         for chunk, srv in chunks_query:
             print(chunk, srv, flush=True)
-            if i >= required_chunks:
+            if not all_chunks and i >= required_chunks:
                 break
             
             url = srv.url.rstrip('/') if srv.url.startswith('http') else f"http://{srv.url.rstrip('/')}"
@@ -226,9 +231,9 @@ async def locate_ida(db: Session, token_user: str, file_model):
 
     return result
 
-async def locate(db: Session, token_user: str, file_model):
+async def locate(db: Session, token_user: str, file_model, all_chunks: bool = False):
     if file_model.disperse in ["IDA", "SIDA"]:
-        servers = await locate_ida(db, token_user, file_model)
+        servers = await locate_ida(db, token_user, file_model, all_chunks=all_chunks)
         return {"routes": servers}
     elif file_model.disperse == "SINGLE":
         servers = locate_single(db, token_user, file_model)

@@ -496,6 +496,43 @@ async def clean(admintoken):
 async def health():
     return jsonify({"status": "ok"}), 200
 
+import aiohttp
+
+@app.route("/metrics", methods=["GET"])
+async def aggregate_metrics():
+    async def fetch_metric(dc_id):
+        url = f"http://datacontainer{dc_id}:80/metrics"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=3) as resp:
+                    if resp.status == 200:
+                        return dc_id, await resp.json()
+        except Exception:
+            pass
+        return dc_id, {"requests_attended": 0, "objects_count": 0, "storage_MB": 0.0}
+
+    tasks = [fetch_metric(i) for i in range(1, 11)]
+    results = await asyncio.gather(*tasks)
+    
+    metrics = {f"datacontainer{dc_id}": data for dc_id, data in results}
+    return jsonify(metrics), 200
+
+@app.route("/metrics/reset", methods=["POST"])
+async def reset_metrics():
+    async def reset_metric(dc_id):
+        url = f"http://datacontainer{dc_id}:80/metrics/reset"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, timeout=2) as resp:
+                    pass
+        except Exception:
+            pass
+
+    tasks = [reset_metric(i) for i in range(1, 11)]
+    await asyncio.gather(*tasks)
+    
+    return jsonify({"message": "Metrics reset across all containers"}), 200
+
 @app.before_serving
 async def initialize_default_organization():
     import asyncio

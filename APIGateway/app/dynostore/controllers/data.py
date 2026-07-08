@@ -235,6 +235,12 @@ class DataController:
             t_read = _t0()
             with open(cache_path, "rb") as f:
                 obj = f.read()
+            
+            try:
+                os.utime(cache_path, None)
+            except Exception as e:
+                _log("warning", "CACHE_UPDATE_MTIME", key_object, "END", "ERROR", f"msg={e}")
+
             _log("debug", "PULL", key_object, "END", "CACHE_HIT",
                  f"path={cache_path};bytes={len(obj)};read_time_ms={_ms_since(t_read):.3f};total_time_ms={_ms_since(t_total):.3f}")
             timeline["pull_end"] = time.time_ns()
@@ -411,6 +417,11 @@ class DataController:
             os.utime(cache_path, None)
             _log("debug", "CACHE_WRITE", key_object, "END", "SUCCESS",
                  f"path={cache_path};bytes={len(obj)};time_ms={_ms_since(t_write):.3f}")
+            
+            # Evict cache in the background to enforce a limit on the number of cached objects
+            import threading
+            max_files = int(os.environ.get("CACHE_MAX_FILES", 100))
+            threading.Thread(target=DataController.evict_cache, kwargs={"max_files": max_files}, daemon=True).start()
         except Exception as e:
             _log("warning", "CACHE_WRITE", key_object, "END", "ERROR",
                  f"path={cache_path};msg={e}")

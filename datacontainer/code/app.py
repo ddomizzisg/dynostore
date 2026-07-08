@@ -8,6 +8,7 @@ import requests
 from werkzeug.utils import secure_filename
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
+import sqlite3
 
 from dynostore.decorators.token import validateToken
 from caching import LRUCacheStorage
@@ -64,6 +65,51 @@ URL_AUTH = "http://" + AUTH_HOST + '/auth/v1/user?tokenuser=' if AUTH_HOST else 
 # initialize storage with 2GB of memory and 20GB of filesystem
 storage = LRUCacheStorage(2 * 1024**3, 20 * 1024**3)
 
+# ----- Internal Metrics DB -----
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"metrics_{DATA_CONTAINEER_ID}.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS metrics
+                 (key TEXT PRIMARY KEY, value INTEGER)''')
+    c.execute('''INSERT OR IGNORE INTO metrics (key, value) VALUES ('requests_attended', 0)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def increment_requests():
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        c = conn.cursor()
+        c.execute('''UPDATE metrics SET value = value + 1 WHERE key = 'requests_attended' ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        _log("METRICS", "-", "END", "ERROR", f"msg=Failed to update metrics db: {e}")
+
+def get_requests_attended():
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        c = conn.cursor()
+        c.execute('''SELECT value FROM metrics WHERE key = 'requests_attended' ''')
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+def reset_metrics():
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        c = conn.cursor()
+        c.execute('''UPDATE metrics SET value = 0 WHERE key = 'requests_attended' ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        _log("METRICS", "-", "END", "ERROR", f"msg=Failed to reset metrics db: {e}")
+
 # check if node is alive
 @app.route('/health', methods=["GET"])
 def health():
@@ -71,6 +117,29 @@ def health():
     resp = jsonify({"message": "Data container is alive"}), 200
     _log("HEALTH", "-", "END", "SUCCESS", "status=200", level="info")
     return resp
+
+@app.route('/metrics', methods=["GET"])
+def metrics():
+    # Count objects directly from filesystem basepath
+    basepath = storage.filesystem.basepath
+    objects_count = 0
+    if os.path.exists(basepath):
+        for root, dirs, files in os.walk(basepath):
+            objects_count += len([f for f in files if f != '.gitkeep'])
+            
+    storage_mb = storage.filesystem.utilization / (1024 * 1024)
+    requests_attended = get_requests_attended()
+    
+    return jsonify({
+        "requests_attended": requests_attended,
+        "objects_count": objects_count,
+        "storage_MB": round(storage_mb, 2)
+    }), 200
+
+@app.route('/metrics/reset', methods=["POST"])
+def reset_metrics_endpoint():
+    reset_metrics()
+    return jsonify({"message": "Metrics reset successfully"}), 200
 
 @app.route('/objects/<objectkey>/<tokenuser>', methods=["PUT"])
 @validateToken(auth_host=AUTH_HOST)
@@ -95,6 +164,7 @@ def download_object(objectkey, tokenuser):
         try:
             generator = storage.get_stream(objectkey)
             _log("DOWNLOAD", objectkey, "END", "SUCCESS", f"status=200", level="info")
+            increment_requests()
             return Response(stream_with_context(generator)), 200
         except Exception as e:
             _log("DOWNLOAD", objectkey, "END", "ERROR", f"msg={e};status=500", level="error")

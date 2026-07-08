@@ -36,3 +36,4 @@ benchmarks/evaluate_scenarios.py
 data/*
 benchmarks/a.txt
 APIGateway/data/app.db
+datacontainer/code/*.db

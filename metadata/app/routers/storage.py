@@ -53,7 +53,7 @@ async def internal_file_info(keyfile: str, db: Session = Depends(get_db)):
 
     if file_model:
         try:
-            data = await locate(db, file_model.owner, file_model)
+            data = await locate(db, file_model.owner, file_model, all_chunks=True)
         except ValueError:
             data = {"routes": []}
         return {

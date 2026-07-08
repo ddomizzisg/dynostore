@@ -87,7 +87,7 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
     # 1. Get original object metadata to find owner and original nodes
     url_get_meta = f"http://{metadata_service}/storage/internal/{obj_id_ori}"
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.get(url_get_meta)
             if resp.status_code != 200:
@@ -107,10 +107,14 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
 
     # Check if replica exists
     url_replica = f"http://{metadata_service}/storage/internal/{new_obj_id}"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url_replica)
-        if resp.status_code == 200 and resp.json().get("exists"):
-            logger.info(f"Replica {new_obj_id} already exists.")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.get(url_replica)
+            if resp.status_code == 200 and resp.json().get("exists"):
+                logger.info(f"Replica {new_obj_id} already exists.")
+                return
+        except Exception as e:
+            logger.error(f"Error checking if replica exists for {new_obj_id}: {e}")
             return
 
     # 2. Pull the original data
@@ -142,7 +146,7 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
     metadata_url = f"http://{metadata_service}/storage/{owner}/system_catalog/{new_obj_id}"
     
     t_meta = time.perf_counter_ns()
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.put(metadata_url, json=request_json)
             if resp.status_code != 201:

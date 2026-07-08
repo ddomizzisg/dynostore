@@ -72,6 +72,14 @@ def clean_system():
             except Exception as e:
                 print(f"Error clearing objects{i}: {e}")
 
+    # Reset internal metrics database in each container API
+    print("Resetting internal metrics via APIGateway...")
+    gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
+    try:
+        requests.post(f"http://{gateway_host}/metrics/reset", timeout=5)
+    except Exception as e:
+        print(f"Failed to reset metrics: {e}")
+
 def restart_cluster(enable_kagio, enable_replicator, build_containers=False):
     print(f"\n---> Restarting Cluster: KAGIO={enable_kagio}, REPLICATOR={enable_replicator} <---")
     env = {
@@ -131,37 +139,22 @@ def get_pageranks(kagio_host):
     return {}
 
 def collect_metrics(kagio_host):
+    gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
     metrics = {}
+    try:
+        resp = requests.get(f"http://{gateway_host}/metrics", timeout=5)
+        if resp.status_code == 200:
+            metrics = resp.json()
+        else:
+            print(f"Error: APIGateway returned {resp.status_code} for metrics")
+    except Exception as e:
+        print(f"Error connecting to APIGateway metrics API: {e}")
+        
+    # Ensure all 10 containers are present in the dictionary
     for i in range(1, 11):
         dc_name = f"datacontainer{i}"
-        
-        # 1. Requests
-        log_file = f"../datacontainer/code/logs/datacontainer-{i}.log"
-        requests_count = 0
-        if os.path.exists(log_file):
-            with open(log_file) as f:
-                content = f.read()
-                requests_count = sum(1 for line in content.split('\n') if "DOWNLOAD" in line and "SUCCESS" in line)
-                
-        # 2. Storage & Objects
-        obj_dir = f"../datacontainer/objects{i}/"
-        obj_count = 0
-        total_size = 0
-        if os.path.exists(obj_dir):
-            for root, dirs, files in os.walk(obj_dir):
-                for f in files:
-                    if f == ".gitkeep":
-                        continue
-                    fp = os.path.join(root, f)
-                    if os.path.isfile(fp):
-                        obj_count += 1
-                        total_size += os.path.getsize(fp)
-                        
-        metrics[dc_name] = {
-            "requests_attended": requests_count,
-            "objects_count": obj_count,
-            "storage_MB": round(total_size / (1024 * 1024), 2)
-        }
+        if dc_name not in metrics:
+            metrics[dc_name] = {"requests_attended": 0, "objects_count": 0, "storage_MB": 0.0}
         
     # 3. PageRanks
     pageranks = get_pageranks(kagio_host)
