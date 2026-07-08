@@ -76,6 +76,36 @@ def plot_pagerank_variation(data):
     plt.savefig('plot_pagerank_variation.png')
     plt.close()
 
+def plot_pagerank_before_after(data):
+    containers = [f"datacontainer{i}" for i in range(1, 11)]
+    x = np.arange(len(containers))
+    width = 0.35
+    
+    for scenario in data:
+        metrics = scenario['container_metrics']
+        before = [metrics.get(c, {}).get('pagerank_before', 0) for c in containers]
+        after = [metrics.get(c, {}).get('pagerank_after', 0) for c in containers]
+        
+        if sum(before) + sum(after) == 0:
+            continue
+            
+        plt.figure(figsize=(14, 7))
+        plt.bar(x - width/2, before, width, label='Before PR', color='#4C72B0')
+        plt.bar(x + width/2, after, width, label='After PR', color='#55A868')
+        
+        plt.title(f"PageRank Before vs After - {scenario['scenario']}")
+        plt.xlabel('Data Containers')
+        plt.ylabel('PageRank Score')
+        plt.xticks(x, [c.replace('datacontainer', 'DC-') for c in containers])
+        plt.legend()
+        plt.tight_layout()
+        
+        safe_name = scenario['scenario'].replace(" ", "_").replace("(", "").replace(")", "").replace(",", "").lower()
+        filename = f'plot_pagerank_before_after_{safe_name}.png'
+        plt.savefig(filename)
+        print(f" -> Saved {filename}")
+        plt.close()
+
 def plot_user_latencies(data):
     scenarios = [d['scenario'] for d in data]
     read_latencies = [d['user_latencies']['read_latencies_seconds'] for d in data]
@@ -204,6 +234,8 @@ def main():
     
     plot_pagerank_variation(data)
     print(" -> Saved plot_pagerank_variation.png")
+    
+    plot_pagerank_before_after(data)
     
     plot_grouped_container_metric(
         data, 
