@@ -125,7 +125,10 @@ def clean_system(runner="apptainer"):
                     run_cmd(f"rm -rf {obj_dir}/*")
             except Exception as e:
                 print(f"Error clearing objects{i}: {e}")
-                
+
+    if runner == "docker":
+        run_cmd("docker compose -f ../docker-compose.dev.yml exec db_metadata psql -U metadata -d metadata-api -c 'TRUNCATE TABLE files, chunks, files_in_servers, abekeys CASCADE;'")
+
     # Reset internal metrics database in each container API
     print("Resetting internal metrics via APIGateway...")
     gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
@@ -443,6 +446,9 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     top_objects = sorted(objects, key=hotness_score, reverse=True)
     top_25_count = max(1, int(len(top_objects) * 0.25))
     top_25 = top_objects[:top_25_count]
+
+    print(top_objects)
+    print(top_25)  # Debugging output to see the top 25% objects selected for benchmarking
     
     print(f"Targeting top {top_25_count} objects with a Pareto-heavy read pattern...")
     

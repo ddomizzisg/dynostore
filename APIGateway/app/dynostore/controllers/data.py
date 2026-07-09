@@ -332,8 +332,11 @@ class DataController:
 
             def get_pr(route):
                 try:
-                    dc_name = route['route'].split("://")[-1].split("/")[0]
-                    return pr_scores.get(dc_name, 999.0)
+                    server_id = route.get("chunk", {}).get("server_id")
+                    if server_id is not None:
+                        dc_name = f"datacontainer{server_id}"
+                        return pr_scores.get(dc_name, 999.0)
+                    return 999.0
                 except Exception:
                     return 999.0
 
@@ -350,41 +353,19 @@ class DataController:
                 
             unique_cids = list(routes_by_cid.keys())
             
-            # Weighted random selection based on KAGIO PR to distribute traffic
             import random
-            if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                # We want to select `k` unique CIDs. We'll assign a weight to each CID based on its best route's PR.
-                # Assuming higher PR is better for load balancing (as per original metadata server logic)
-                cid_weights = []
-                for cid in unique_cids:
-                    best_pr = max([get_pr(r) for r in routes_by_cid[cid]])
-                    # Use Inverse PageRank! High PR = congested. Low PR = under-utilized replica.
-                    # By inverting, we route traffic TO the new replicas and away from the core.
-                    cid_weights.append(1.0 / (best_pr + 1e-6))
-                
-                try:
-                    # Select k unique CIDs without replacement based on PR weights
-                    # random.choices doesn't support without replacement, so we do it manually
-                    selected_cids = []
-                    available_cids = list(unique_cids)
-                    available_weights = list(cid_weights)
-                    
-                    while len(selected_cids) < k and available_cids:
-                        chosen = random.choices(available_cids, weights=available_weights, k=1)[0]
-                        selected_cids.append(chosen)
-                        idx = available_cids.index(chosen)
-                        available_cids.pop(idx)
-                        available_weights.pop(idx)
-                    unique_cids = selected_cids
-                except Exception:
-                    # Fallback to simple shuffle if PR weights fail
-                    random.shuffle(unique_cids)
-            else:
-                random.shuffle(unique_cids)
+            random.shuffle(unique_cids)
             
             async with aiohttp.ClientSession() as session_reqs:
                 async def fetch_with_fallback(cid):
-                    for route in routes_by_cid.get(cid, []):
+                    chunk_routes = routes_by_cid.get(cid, [])
+                    if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
+                        # Sort by ascending PR so we query the least congested container first
+                        chunk_routes.sort(key=get_pr)
+                    else:
+                        random.shuffle(chunk_routes)
+                        
+                    for route in chunk_routes:
                         target_key = key_object + "_r2" if route.get('is_replica') else key_object
                         try:
                             return await DataController.download_chunk(session_reqs, route, target_key)
