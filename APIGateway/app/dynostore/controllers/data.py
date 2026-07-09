@@ -280,20 +280,10 @@ class DataController:
                         return await resp.json(), resp.status
                     result = await resp.json()
                     
-                # Check for replica (_r2)
-                url_r2 = f"http://{metadata_service}/storage/{token_user}/{key_object}_r2"
-                async with session.get(url_r2) as resp_r2:
-                    if resp_r2.status == 200:
-                        result_r2 = await resp_r2.json()
-                        for route in result_r2['data'].get('routes', []):
-                            route['is_replica'] = True
-                        for route in result['data'].get('routes', []):
-                            route['is_replica'] = False
-                        routes = result['data'].get('routes', []) + result_r2['data'].get('routes', [])
-                    else:
-                        routes = result['data'].get('routes', [])
-                        for route in routes:
-                            route['is_replica'] = False
+                routes = result['data'].get('routes', [])
+                for route in routes:
+                    if 'is_replica' not in route:
+                        route['is_replica'] = False
         except Exception as e:
             _log("error", "PULL_METADATA", key_object, "END", "EXCEPTION",
                  f"url={url};msg={e};http_time_ms={_ms_since(t_http):.3f}")
@@ -312,20 +302,33 @@ class DataController:
             k = metadata_object.get('required_chunks', 1)
             pr_scores = {}
             if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                try:
-                    from kagio.kagio import KAGIO
-                    KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
-                    KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
-                    KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
-                    KAGIO_BASE_URL = os.getenv("API_BASE_URL", "http://10.18.173.209:8080")
-                    kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
-                    pr_list = await asyncio.to_thread(kagio_client.centrality.data_containers_page_rank)
-                    if pr_list and getattr(pr_list, 'data', None):
-                        for dc in pr_list.data:
-                            dc_name = dc.get("vertex", "").replace("metadata_", "")
-                            pr_scores[dc_name] = dc.get("pagerank", 999.0)
-                except Exception as e:
-                    logger.error(f"Failed to fetch PageRank in pull_data: {e}")
+                cache = getattr(DataController, "_kagio_pr_cache", {})
+                cache_time = getattr(DataController, "_kagio_pr_cache_time", 0.0)
+                if time.time() - cache_time < 5.0:
+                    pr_scores = cache
+                else:
+                    try:
+                        from kagio.kagio import KAGIO
+                        KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
+                        KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
+                        KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
+                        KAGIO_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
+                        kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
+                        pr_list = await asyncio.to_thread(kagio_client.centrality.data_containers_page_rank)
+                        if pr_list and getattr(pr_list, 'data', None):
+                            for dc in pr_list.data:
+                                dc_name = dc.get("vertex", "").replace("metadata_", "")
+                                pr_scores[dc_name] = dc.get("pagerank", 999.0)
+                        DataController._kagio_pr_cache = pr_scores
+                        DataController._kagio_pr_cache_time = time.time()
+                    except Exception as e:
+                        try:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"Failed to fetch PageRank in pull_data: {e}")
+                        except Exception:
+                            pass
+                        pr_scores = cache
 
             def get_pr(route):
                 try:
@@ -334,30 +337,63 @@ class DataController:
                 except Exception:
                     return 999.0
 
-            sorted_routes = sorted(routes, key=get_pr)
-            
-            selected_routes = []
-            seen_chunk_ids = set()
-            for route in sorted_routes:
+            # Group by chunk id for robust fallbacks
+            routes_by_cid = {}
+            for route in routes:
                 try:
                     cid = int(route["chunk"]["name"].split("_")[0].replace("c", "")) - 1
                 except Exception:
                     cid = 0
-                if cid not in seen_chunk_ids:
-                    seen_chunk_ids.add(cid)
-                    selected_routes.append(route)
-                if len(selected_routes) == k:
-                    break
+                if cid not in routes_by_cid:
+                    routes_by_cid[cid] = []
+                routes_by_cid[cid].append(route)
+                
+            unique_cids = list(routes_by_cid.keys())
+            
+            # Weighted random selection based on KAGIO PR to distribute traffic
+            import random
+            if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
+                # We want to select `k` unique CIDs. We'll assign a weight to each CID based on its best route's PR.
+                # Assuming higher PR is better for load balancing (as per original metadata server logic)
+                cid_weights = []
+                for cid in unique_cids:
+                    best_pr = max([get_pr(r) for r in routes_by_cid[cid]])
+                    # Use Inverse PageRank! High PR = congested. Low PR = under-utilized replica.
+                    # By inverting, we route traffic TO the new replicas and away from the core.
+                    cid_weights.append(1.0 / (best_pr + 1e-6))
+                
+                try:
+                    # Select k unique CIDs without replacement based on PR weights
+                    # random.choices doesn't support without replacement, so we do it manually
+                    selected_cids = []
+                    available_cids = list(unique_cids)
+                    available_weights = list(cid_weights)
                     
-            if len(selected_routes) < k:
-                logger.warning(f"Not enough unique chunks! Found {len(selected_routes)}, needed {k}. Reverting to all routes.")
-                selected_routes = routes
-
-            async with aiohttp.ClientSession() as session:
-                tasks = []
-                for route in selected_routes:
-                    target_key = key_object + "_r2" if route.get('is_replica') else key_object
-                    tasks.append(DataController.download_chunk(session, route, target_key))
+                    while len(selected_cids) < k and available_cids:
+                        chosen = random.choices(available_cids, weights=available_weights, k=1)[0]
+                        selected_cids.append(chosen)
+                        idx = available_cids.index(chosen)
+                        available_cids.pop(idx)
+                        available_weights.pop(idx)
+                    unique_cids = selected_cids
+                except Exception:
+                    # Fallback to simple shuffle if PR weights fail
+                    random.shuffle(unique_cids)
+            else:
+                random.shuffle(unique_cids)
+            
+            async with aiohttp.ClientSession() as session_reqs:
+                async def fetch_with_fallback(cid):
+                    for route in routes_by_cid.get(cid, []):
+                        target_key = key_object + "_r2" if route.get('is_replica') else key_object
+                        try:
+                            return await DataController.download_chunk(session_reqs, route, target_key)
+                        except Exception:
+                            continue
+                    raise Exception(f"All container routes for chunk {cid} failed.")
+                    
+                # Request exactly k unique chunks
+                tasks = [fetch_with_fallback(cid) for cid in unique_cids[:k]]
                 results = await asyncio.gather(*tasks)
         except Exception as e:
             _log("error", "PULL_CHUNKS", key_object,

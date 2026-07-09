@@ -313,7 +313,23 @@ async def pull_file(tokenuser: str, keyfile: str, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail=f"Object {keyfile} not found or not authorized for {tokenuser}")
 
     try:
-        data = await locate(db, tokenuser, file_model)
+        data = await locate(db, tokenuser, file_model, all_chunks=True)
+        # Mark original routes
+        for r in data.get("routes", []):
+            r["is_replica"] = False
+            
+        # Check for replica
+        replica_model = db.query(File).filter(
+            File.keyfile == keyfile + "_r2",
+            File.removed == False,
+            File.owner == tokenuser
+        ).first()
+        if replica_model:
+            replica_data = await locate(db, tokenuser, replica_model, all_chunks=True)
+            for r in replica_data.get("routes", []):
+                r["is_replica"] = True
+            if "routes" in data:
+                data["routes"].extend(replica_data.get("routes", []))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

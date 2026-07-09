@@ -25,10 +25,21 @@ def _norm(vals: list[float]) -> list[float]:
         return [0.0] * len(vals)
     return [v / vmax for v in vals]
 
+import time
+
+_KAGIO_CACHE = {}
+_KAGIO_CACHE_TIME = 0.0
+_KAGIO_TTL = 5.0
+
 def get_kagio_pageranks() -> dict:
+    global _KAGIO_CACHE, _KAGIO_CACHE_TIME
     pr_map = {}
     if os.getenv("ENABLE_KAGIO", "true").lower() != "true":
         return pr_map
+        
+    if time.time() - _KAGIO_CACHE_TIME < _KAGIO_TTL:
+        return _KAGIO_CACHE
+
     print(f"Fetching KAGIO pageranks from {KAGIO_BASE_URL} with FOXX URL {KAGIO_FOXX_URL} and DB {KAGIO_FOXX_DB}", flush=True)
     
     try:
@@ -41,8 +52,12 @@ def get_kagio_pageranks() -> dict:
                 pr_map[dc_id] = float(entry["pagerank"])
             except Exception:
                 continue
+        _KAGIO_CACHE = pr_map
+        _KAGIO_CACHE_TIME = time.time()
     except Exception as e:
         print(f"Error fetching KAGIO pagerank: {e}")
+        return _KAGIO_CACHE
+        
     return pr_map
 
 def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int = 0):
@@ -185,49 +200,28 @@ async def locate_ida(db: Session, token_user: str, file_model, all_chunks: bool 
         Chunk.keyfile == file_model.keyfile
     ).all()
     
-    if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-        pr_map = get_kagio_pageranks()
-        print(f"PR Map for locating IDA: {pr_map}", flush=True)  # Debugging output to see the PageRank values
-        # Prefer HIGHER PR containers for reads to avoid saturating low-PR hot replicas.
-        chunks_query.sort(key=lambda x: pr_map.get(x[1].id, float("-inf")), reverse=True)
-        print(f"Sorted chunks_query by PR: {chunks_query}", flush=True)  # Debugging output to see the sorted chunks
-        
     result = []
     i: int = 0
 
-    print(chunks_query, flush=True)
-    
-    async with httpx.AsyncClient() as client:
-        # We need to iterate over chunks and find `required_chunks` healthy servers
-        for chunk, srv in chunks_query:
-            print(chunk, srv, flush=True)
-            if not all_chunks and i >= required_chunks:
-                break
-            
-            url = srv.url.rstrip('/') if srv.url.startswith('http') else f"http://{srv.url.rstrip('/')}"
-            
-            try:
-                print(f"URL: {url}", flush=True)
-                response = await client.get(f"{url}/health", timeout=3.0)
-                print(f"Response: {response.status_code}", flush=True)
-                if response.status_code == 200:
-                    result.append({
-                        "chunk": {
-                            "id": chunk.id,
-                            "keyfile": chunk.keyfile,
-                            "keychunk": chunk.keychunk,
-                            "name": chunk.name,
-                            "size": chunk.size,
-                            "server_id": chunk.server_id
-                        },
-                        "route": f"{url}/objects/{chunk.keyfile}{chunk.keychunk}/{token_user}",
-                        "server": url
-                    })
-                    i += 1
-            except httpx.RequestError as e:
-                print(str(e), flush=True)
-                print("Error", flush=True)
-                continue
+    # We return the chunks directly and let the API Gateway handle health checks / fallbacks
+    for chunk, srv in chunks_query:
+        if not all_chunks and i >= required_chunks:
+            break
+        
+        url = srv.url.rstrip('/') if srv.url.startswith('http') else f"http://{srv.url.rstrip('/')}"
+        result.append({
+            "chunk": {
+                "id": chunk.id,
+                "keyfile": chunk.keyfile,
+                "keychunk": chunk.keychunk,
+                "name": chunk.name,
+                "size": chunk.size,
+                "server_id": chunk.server_id
+            },
+            "route": f"{url}/objects/{chunk.keyfile}{chunk.keychunk}/{token_user}",
+            "server": url
+        })
+        i += 1
 
     return result
 

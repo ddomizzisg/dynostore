@@ -274,6 +274,20 @@ def wait_for_all_kagio_sync(kagio_host, targets, timeout=60):
     print("  -> Warning: KAGIO sync timed out for some objects. Proceeding anyway.")
     return False
 
+def wait_for_pagerank_update(kagio_host, old_pr, timeout=30):
+    if not old_pr:
+        return False
+    print("--- Waiting for KAGIO PageRanks to recalculate ---")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        new_pr = get_pageranks(kagio_host)
+        if new_pr and new_pr != old_pr:
+            print(f"  -> PageRanks updated in {round(time.time() - start_time, 2)} seconds!")
+            return True
+        time.sleep(2)
+    print("  -> Warning: KAGIO PageRanks did not change within timeout.")
+    return False
+
 def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False, runner="apptainer", seed=42, max_size_mb=64, max_warmup_reads=20, delay_factor=1.0, kagio_timeout=90, skip_barriers=False):
     print(f"\n=======================================================")
     print(f" RUNNING SCENARIO: {scenario_name}")
@@ -357,8 +371,10 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
             
     if objects and enable_kagio:
         print("\n  -> Final Phase 1 barrier: waiting for ALL objects to sync...")
+        pr_snapshot = get_pageranks(kagio_host)
         targets = {obj["id"]: obj["reads"] for obj in objects}
         wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
+        wait_for_pagerank_update(kagio_host, pr_snapshot, timeout=kagio_timeout)
     elif not enable_kagio:
         time.sleep(5 * delay_factor) # Brief wait if kagio is disabled just in case
 
@@ -381,11 +397,29 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 print(f"  -> Replication endpoint returned status {repl_resp.status_code}.")
         except Exception as e:
             print(f"  -> Failed to force replication: {e}")
+            
+        print(f"  -> Waiting for background EC threads to finish replication...")
+        import glob
+        temp_dir = os.path.join(APIGATEWAY_APP_DIR, ".temp")
+        start_wait = time.time()
+        while True:
+            pending_files = glob.glob(os.path.join(temp_dir, "*.pending"))
+            if not pending_files:
+                break
+            if time.time() - start_wait > 300: # 5 minute timeout
+                print(f"  -> Warning: EC wait timeout reached. {len(pending_files)} still pending.")
+                break
+            time.sleep(1)
+        print(f"  -> All EC replication threads completed in {round(time.time() - start_wait, 2)}s.")
+            
         time.sleep(5 * delay_factor) # Small buffer after replication
     else:
         print("\n--- Phase 2: Replication disabled, skipping ---")
 
     print("\n--- Collecting PageRanks before benchmark ---")
+    if enable_kagio:
+        print("  -> Sleeping for 6 seconds to ensure APIGateway PageRank cache expires...")
+        time.sleep(6)
     pr_before = get_pageranks(kagio_host) # if enable_kagio else {}
 
     print(pr_before)  # Debugging output to see the PageRank values before benchmarking
