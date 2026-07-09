@@ -301,9 +301,11 @@ class DataController:
         try:
             k = metadata_object.get('required_chunks', 1)
             pr_scores = {}
+            print(f"ENABLE_KAGIO={os.getenv('ENABLE_KAGIO', 'true')}", flush=True)
             if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
                 cache = getattr(DataController, "_kagio_pr_cache", {})
                 cache_time = getattr(DataController, "_kagio_pr_cache_time", 0.0)
+                print(f"Using KAGIO for PageRank; cache_time={cache_time}, current_time={time.time()}, diff={time.time() - cache_time}", flush=True)
                 if time.time() - cache_time < 5.0:
                     pr_scores = cache
                 else:
@@ -313,12 +315,27 @@ class DataController:
                         KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
                         KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
                         KAGIO_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
+                        print(f"KAGIO_BASE_URL={KAGIO_BASE_URL}, KAGIO_FOXX_URL={KAGIO_FOXX_URL}, KAGIO_FOXX_DB={KAGIO_FOXX_DB}, KAGIO_API_KEY={KAGIO_API_KEY}", flush=True)
                         kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
                         pr_list = await asyncio.to_thread(kagio_client.centrality.data_containers_page_rank)
-                        if pr_list and getattr(pr_list, 'data', None):
-                            for dc in pr_list.data:
-                                dc_name = dc.get("vertex", "").replace("metadata_", "")
+                        print(f"Fetched PageRank from KAGIO: {pr_list}", flush=True)
+                        if hasattr(pr_list, 'data'):
+                            items = pr_list.data
+                        elif isinstance(pr_list, list):
+                            items = pr_list
+                        else:
+                            items = []
+                            
+                        for dc in items:
+                            vertex = dc.get("id", dc.get("vertex", "")).replace("metadata_", "")
+                            num_str = ''.join(filter(str.isdigit, vertex))
+                            if num_str:
+                                num = int(num_str)
+                                # Map dc-0 to datacontainer1
+                                dc_name = f"datacontainer{num + 1}" if "dc-" in vertex else f"datacontainer{num}"
                                 pr_scores[dc_name] = dc.get("pagerank", 999.0)
+                            else:
+                                pr_scores[vertex] = dc.get("pagerank", 999.0)
                         DataController._kagio_pr_cache = pr_scores
                         DataController._kagio_pr_cache_time = time.time()
                     except Exception as e:
@@ -335,7 +352,10 @@ class DataController:
                     server_id = route.get("chunk", {}).get("server_id")
                     if server_id is not None:
                         dc_name = f"datacontainer{server_id}"
-                        return pr_scores.get(dc_name, 999.0)
+                        pr_value = pr_scores.get(dc_name, 999.0)
+                        print(pr_scores, flush=True)
+                        print(f"PR for {dc_name} {server_id}: {pr_value}", flush=True)
+                        return pr_value
                     return 999.0
                 except Exception:
                     return 999.0
@@ -364,6 +384,8 @@ class DataController:
                         chunk_routes.sort(key=get_pr)
                     else:
                         random.shuffle(chunk_routes)
+
+                    print("chunk routes" + str(chunk_routes), flush=True )
                         
                     for route in chunk_routes:
                         target_key = key_object + "_r2" if route.get('is_replica') else key_object
