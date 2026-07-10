@@ -69,8 +69,8 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
     print(f"Nodes with UF values: {nodes}", flush=True)  # Debugging output to see the UF values before sorting
 
     # Simulator weights
-    pr_weight = 0.75
-    uf_weight = 0.25
+    pr_weight = 0.5
+    uf_weight = 0.5
     total_w = uf_weight + pr_weight
     w_uf_default = uf_weight / total_w
     w_pr_default = pr_weight / total_w
@@ -97,9 +97,9 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
         rng = random.Random()
         for i, node in enumerate(nodes):
             epsilon = rng.random() * 1e-6
-            # INVERT PR: Cold nodes have HIGH PR. We want a LOW score to be picked. 
-            # So a high PR should result in a low PR score component.
-            node["score"] = (w_uf_default * uf_norm[i]) + (w_pr_default * (1.0 - pr_norm[i])) + epsilon
+            # PR directly correlates to hotness. Cold nodes have LOW PR.
+            # We want a LOW score to be picked, so a low PR should directly result in a low score component.
+            node["score"] = (w_uf_default * uf_norm[i]) + (w_pr_default * pr_norm[i]) + epsilon
 
         nodes.sort(key=lambda x: x["score"])
 

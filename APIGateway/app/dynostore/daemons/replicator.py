@@ -137,8 +137,8 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
         "size": meta["size"],
         "hash": meta["hash"],
         "is_encrypted": meta["is_encrypted"],
-        "chunks": 5, # or meta["chunks"]
-        "required_chunks": 2, # or meta["required_chunks"]
+        "chunks": int(os.getenv("EC_N", 5)),
+        "required_chunks": int(os.getenv("EC_K", 2)),
         "excluded_nodes": original_nodes,
         "indegree": n_reads
     }
@@ -174,9 +174,11 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
         
     try:
         from threading import Thread
+        n_val = int(os.getenv("EC_N", 5))
+        k_val = int(os.getenv("EC_K", 2))
         thread = Thread(
             target=DataController._background_erasure_coding,
-            args=(object_path, new_obj_id, owner, new_nodes),
+            args=(object_path, new_obj_id, owner, new_nodes, n_val, k_val),
             daemon=False
         )
         thread.start()

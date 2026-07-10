@@ -291,23 +291,26 @@ def wait_for_pagerank_update(kagio_host, old_pr, timeout=30):
     print("  -> Warning: KAGIO PageRanks did not change within timeout.")
     return False
 
-def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10, benchmark_reads=50, build_containers=False, runner="apptainer", seed=42, max_size_mb=64, max_warmup_reads=20, delay_factor=1.0, kagio_timeout=90, skip_barriers=False):
+def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None):
+    if enable_kagio_phase3 is None:
+        enable_kagio_phase3 = enable_kagio_phase1
+
     print(f"\n=======================================================")
     print(f" RUNNING SCENARIO: {scenario_name}")
     print(f"=======================================================")
     
+    print("\n--- Cleaning up previous state ---")
     clean_system(runner=runner)
-    restart_cluster(enable_kagio, enable_replicator, build_containers, runner=runner)
+    restart_cluster(enable_kagio_phase1, enable_replicator, build_containers, runner=runner)
     
     gateway_host = os.getenv("GATEWAY_HOST", "127.0.0.1:8070")
     kagio_host = os.getenv("KAGIO_HOST", "http://localhost:8080")
     catalog_name = "eval_catalog"
+    print(f"Gateway Host: {gateway_host}, KAGIO Host: {kagio_host}, Catalog: {catalog_name}")
     client = Client(gateway_host)
-    rnd = random.Random(seed) # Deterministic workload
-    client_regions = ["eu-west", "us-east", "us-west", "ap-south"]
     
     print("\n--- Phase 1: Ingestion & Indegree Generation ---")
-    objects = []
+    objects = [dict(obj) for obj in workload] if workload else []
     
     write_latencies = []
     read_latencies = []
@@ -316,16 +319,17 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     total_mb_written = 0
     total_mb_read_warmup = 0
     
-    region_weights = [0.40, 0.30, 0.20, 0.10]
+    t_ingest_start = time.time()
     
-    t_ingest_start = time.time()    
-    for i in range(num_objects):
-        region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
-        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=max_size_mb, alpha=1.35)
-        size_B = size_MB * 1024**2
-        obj_id = str(uuid.uuid4())
+    for i, obj in enumerate(objects):
+        obj_id = obj["id"]
+        size_MB = obj["size_MB"]
+        region = obj["region"]
+        times = obj["reads"]
+        size_B = int(size_MB * 1024**2)
         
-        print(f"[{i+1}/{num_objects}] Uploading {size_MB}MB for {obj_id} from {region}...")
+        print(f"[{i+1}/{len(objects)}] Uploading {size_MB}MB for {obj_id} from {region}...")
+        
         data = os.urandom(size_B)
         
         t0 = time.time()
@@ -339,20 +343,6 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
             
         write_latencies.append(t1 - t0)
         total_mb_written += size_MB
-
-        # Realistic access skew: a few hot objects receive the majority of reads.
-        times = sample_read_count(rnd, min_reads=1, max_reads=max_warmup_reads, alpha=1.18)
-        if enable_kagio:
-            times = int(times * 1.25)
-        if enable_replicator:
-            times = int(times * 1.10)
-
-        objects.append({
-            "id": obj_id,
-            "reads": times,
-            "size_MB": size_MB,
-            "region": region
-        })
 
         print(f"  -> Performing {times} warm-up reads to generate baseline graph...")
         for _ in range(times):
@@ -368,24 +358,24 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 failed_reads += 1
 
         # NEW: Sync KAGIO periodically so the load balancer can react
-        if enable_kagio and not skip_barriers and (i + 1) % 5 == 0:
+        if enable_kagio_phase1 and not skip_barriers and (i + 1) % 5 == 0:
             print(f"  -> Intermediate KAGIO Sync after {i+1} objects...")
             wait_for_kagio_sync(kagio_host, obj_id, times, timeout=kagio_timeout)
             
-    if objects and enable_kagio:
+    if objects and enable_kagio_phase1:
         print("\n  -> Final Phase 1 barrier: waiting for ALL objects to sync...")
         pr_snapshot = get_pageranks(kagio_host)
         targets = {obj["id"]: obj["reads"] for obj in objects}
         wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
         wait_for_pagerank_update(kagio_host, pr_snapshot, timeout=kagio_timeout)
-    elif not enable_kagio:
+    elif not enable_kagio_phase1:
         time.sleep(5 * delay_factor) # Brief wait if kagio is disabled just in case
 
     t_ingest_end = time.time()
     ingestion_time = t_ingest_end - t_ingest_start
 
     print("\n--- Collecting metrics before replication ---")
-    metrics_before_repl = collect_metrics(kagio_host, enable_kagio=enable_kagio)
+    metrics_before_repl = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase1)
     replication_time = 0.0
 
     if enable_replicator:
@@ -419,8 +409,15 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     else:
         print("\n--- Phase 2: Replication disabled, skipping ---")
 
+    # Mid-Scenario Restart for Hybrid Scenarios
+    if enable_kagio_phase1 != enable_kagio_phase3:
+        print(f"\n--- Mid-Scenario Restart: Switching KAGIO (PR) strategy to {enable_kagio_phase3} ---")
+        restart_cluster(enable_kagio_phase3, enable_replicator, build_containers=False, runner=runner)
+        # We must re-instantiate the client so it can authenticate again
+        client = Client(gateway_host)
+
     print("\n--- Collecting PageRanks before benchmark ---")
-    if enable_kagio:
+    if enable_kagio_phase3:
         print("  -> Sleeping for 6 seconds to ensure APIGateway PageRank cache expires...")
         time.sleep(6)
     pr_before = get_pageranks(kagio_host) # if enable_kagio else {}
@@ -432,15 +429,9 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     benchmark_mb_read = 0
     failed_benchmark_reads = 0
     
-    # When KAGIO is enabled, rank the hottest objects using both their observed access skew
-    # and a lightweight PageRank influence, which better reflects PR-aware placement.
     def hotness_score(obj):
         base = float(obj["reads"])
         size_factor = float(obj.get("size_MB", 1)) / 64.0
-        if enable_kagio and pr_before:
-            avg_pr = sum(pr_before.values()) / max(1, len(pr_before))
-            pr_factor = 1.0 + min(2.0, avg_pr / max(1.0, sum(pr_before.values()) or 1.0))
-            return (base * 1.5) + (size_factor * 10.0) + (base * pr_factor * 0.2)
         return base + (size_factor * 5.0)
 
     top_objects = sorted(objects, key=hotness_score, reverse=True)
@@ -453,18 +444,11 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     print(f"Targeting top {top_25_count} objects with a Pareto-heavy read pattern...")
     
     t_start = time.time()
-    last_bench_reads = 0
     for idx, obj in enumerate(top_25):
         obj_id = obj["id"]
-        base_budget = max(benchmark_reads, 1)
-        read_budget = int(sample_pareto(rnd, alpha=1.18, scale=max(base_budget * 2.5, 5.0), min_value=base_budget, max_value=base_budget * 12))
-        if enable_kagio:
-            read_budget = int(read_budget * 1.15)
-        if enable_replicator:
-            read_budget = int(read_budget * 1.10)
+        read_budget = obj["benchmark_reads"]
             
         last_bench_reads = read_budget
-        obj["benchmark_reads"] = read_budget
 
         print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj['size_MB']}MB)...")
         
@@ -480,7 +464,7 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
                 failed_benchmark_reads += 1
                 
             # NEW: Add barriers during benchmarking to allow PR LB to distribute reads
-            if enable_kagio and not skip_barriers and (r_idx + 1) % max(10, read_budget // 5) == 0:
+            if enable_kagio_phase3 and not skip_barriers and (r_idx + 1) % max(10, read_budget // 5) == 0:
                 print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{read_budget} reads...")
                 wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=max(5, int(15 * delay_factor)))
             
@@ -488,15 +472,15 @@ def run_scenario(scenario_name, enable_kagio, enable_replicator, num_objects=10,
     perf_time = round(t_end - t_start, 2)
     print(f"\nBenchmark Performance Time: {perf_time} seconds")
     
-    if top_25 and enable_kagio:
+    if top_25 and enable_kagio_phase3:
         print(f"  -> Final Phase 3 PR barrier: waiting for KAGIO to catch up on ALL benchmark reads...")
         targets = {obj["id"]: obj["reads"] + obj["benchmark_reads"] for obj in top_25}
         wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
-    elif not enable_kagio:
+    elif not enable_kagio_phase3:
         time.sleep(5 * delay_factor)
     
     print("\n--- Phase 4: Collecting Metrics ---")
-    metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio)
+    metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase3)
     
     # Calculate PageRank variation
     requests_list = []
@@ -601,17 +585,39 @@ def main():
             return True
         return False
     
+    # Pre-generate deterministic workload globally
+    print("Pre-generating deterministic workload...")
+    rnd = random.Random(args.seed)
+    client_regions = ["eu-west", "us-east", "us-west", "ap-south"]
+    region_weights = [0.40, 0.30, 0.20, 0.10]
+    global_workload = []
+    
     kwargs = {
-        "num_objects": args.num_objects,
-        "benchmark_reads": args.benchmark_reads,
-        "runner": args.runner,
-        "seed": args.seed,
-        "max_size_mb": args.max_size_mb,
-        "max_warmup_reads": args.max_warmup_reads,
         "delay_factor": args.delay_factor,
         "kagio_timeout": args.kagio_timeout,
-        "skip_barriers": args.skip_barriers
+        "skip_barriers": args.skip_barriers,
+        "build_containers": should_build(),
+        "runner": args.runner,
+        "rnd": rnd
     }
+
+    for _ in range(args.num_objects):
+        region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
+        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=args.max_size_mb, alpha=1.35)
+        # Seed deterministic UUIDs so they are identical across multiple script runs if seed matches
+        obj_id = str(uuid.UUID(int=rnd.getrandbits(128)))
+        times = sample_read_count(rnd, min_reads=1, max_reads=args.max_warmup_reads, alpha=1.18)
+        
+        base_budget = max(args.benchmark_reads, 1)
+        b_reads = int(sample_pareto(rnd, alpha=1.18, scale=max(base_budget * 2.5, 5.0), min_value=base_budget, max_value=base_budget * 12))
+        
+        global_workload.append({
+            "id": obj_id,
+            "reads": times,
+            "size_MB": size_MB,
+            "region": region,
+            "benchmark_reads": b_reads
+        })
 
     def save_results(target_file, is_interim=False):
         final_results = []
@@ -628,17 +634,22 @@ def main():
 
     try:
         if "all" in tests_to_run or "1" in tests_to_run:
-            res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio=False, enable_replicator=False, build_containers=should_build(), **kwargs)
+            res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio_phase1=False, enable_replicator=False, workload=global_workload, **kwargs)
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
             
         if "all" in tests_to_run or "2" in tests_to_run:
-            res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio=True, enable_replicator=False, build_containers=should_build(), **kwargs)
+            res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio_phase1=True, enable_replicator=False, workload=global_workload, **kwargs)
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
             
         if "all" in tests_to_run or "3" in tests_to_run:
-            res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio=True, enable_replicator=True, build_containers=should_build(), **kwargs)
+            res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio_phase1=True, enable_replicator=True, workload=global_workload, **kwargs)
+            new_results.append(res)
+            if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
+
+        if "all" in tests_to_run or "4" in tests_to_run:
+            res = run_scenario("Hybrid (UF Warmup, Replicate, PR Benchmark)", enable_kagio_phase1=False, enable_replicator=True, enable_kagio_phase3=True, workload=global_workload, **kwargs)
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
     except Exception as e:

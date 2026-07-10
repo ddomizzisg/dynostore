@@ -295,6 +295,8 @@ class DataController:
              f"routes={len(routes)};is_encrypted={metadata_object.get('is_encrypted')};"
              f"required={metadata_object.get('required_chunks')};total={metadata_object.get('chunks')};"
              f"time_ms={(metadata_retrieval_end - metadata_retrieval_start)/1e6:.3f}")
+        
+        print("Routes from metadata:", routes, flush=True)
 
         # chunks
         chunk_retrieval_start = time.perf_counter_ns()
@@ -499,10 +501,9 @@ class DataController:
         }
 
     @staticmethod
-    def _resilient_distribution(object_id, data_bytes, token_user):
+    def _resilient_distribution(object_id, data_bytes, token_user, n=5, k=2):
         chunk_start = time.perf_counter_ns()
         
-        k, n = 2, 5
         encoder_obj = Encoder(k, n)
 
         if len(data_bytes) == 0:
@@ -552,7 +553,7 @@ class DataController:
         DataController.catalog_cache[(token_user, catalog)] = catalog_result
 
     @staticmethod
-    def _background_erasure_coding(object_path, key_object, token_user, nodes):
+    def _background_erasure_coding(object_path, key_object, token_user, nodes, n=5, k=2):
         t_total = _t0()
         _log("debug", "EC", key_object, "START", "INIT",
              f"path={object_path};nodes={len(nodes) if isinstance(nodes, list) else 'N/A'}")
@@ -578,7 +579,7 @@ class DataController:
 
             # split into fragments
             fragments, n, k, chunk_time = DataController._resilient_distribution(
-                key_object, data_bytes, token_user
+                key_object, data_bytes, token_user, n, k
             )
             ec_end = time.time_ns()
 
@@ -769,8 +770,11 @@ class DataController:
         token_catalog = catalog_result['data']['tokencatalog']
 
         # set status fields; chunks/k can later be aligned with EC results
-        request_json['chunks'] = 5
-        request_json['required_chunks'] = 2
+        n_val = request_json.get('n') or int(os.environ.get("EC_N", 3))
+        k_val = request_json.get('k') or int(os.environ.get("EC_K", 2))
+        
+        request_json['chunks'] = n_val
+        request_json['required_chunks'] = k_val
         request_json['coding_status'] = 'pending'
 
         # register metadata (async HTTP)
@@ -810,11 +814,11 @@ class DataController:
         try:
             # thread = threading.Thread(
             #     target=DataController._background_erasure_coding,
-            #     args=(object_path, key_object, token_user, nodes),  # <-- fixed
+            #     args=(object_path, key_object, token_user, nodes, n_val, k_val),  # <-- fixed
             #     daemon=False
             # )
             # thread.start()
-            DataController._background_erasure_coding(object_path, key_object, token_user, nodes)
+            DataController._background_erasure_coding(object_path, key_object, token_user, nodes, n_val, k_val)
             _merge_timeline_atomic(timeline_path, {
                 "ec_thread_dispatch": {"start": ec_thread_start},
                 "coding_status": "in_progress"

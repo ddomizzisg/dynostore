@@ -8,6 +8,7 @@ x-kagio-env: &kagio-env
   KAGIO_FOXX_DB: "fgcs"
   ENABLE_KAGIO: "${ENABLE_KAGIO:-true}"
   ENABLE_REPLICATOR: "${ENABLE_REPLICATOR:-true}"
+  
 
 services:
   # metadata:
@@ -46,6 +47,9 @@ services:
       PUBLIC_IP: 192.168.1.116:8070
       LOG_WATCHER_LOG_FILE: /app/logs/kagio.log
       LOG_FILES: '["/app/logs/dynostore.log"]'
+      CACHE_MAX_FILES: 10
+      EC_N: "${EC_N:-3}"
+      EC_K: "${EC_K:-2}"
     restart: always
     networks:
       dynonetwork:
