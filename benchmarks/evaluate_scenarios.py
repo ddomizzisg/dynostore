@@ -291,7 +291,7 @@ def wait_for_pagerank_update(kagio_host, old_pr, timeout=30):
     print("  -> Warning: KAGIO PageRanks did not change within timeout.")
     return False
 
-def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None):
+def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None, read_distribution="sequential"):
     if enable_kagio_phase3 is None:
         enable_kagio_phase3 = enable_kagio_phase1
 
@@ -441,32 +441,57 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
     print(top_objects)
     print(top_25)  # Debugging output to see the top 25% objects selected for benchmarking
     
-    print(f"Targeting top {top_25_count} objects with a Pareto-heavy read pattern...")
+    print(f"Targeting top {top_25_count} objects with a {read_distribution.upper()} read pattern...")
     
     t_start = time.time()
-    for idx, obj in enumerate(top_25):
-        obj_id = obj["id"]
-        read_budget = obj["benchmark_reads"]
-            
-        last_bench_reads = read_budget
-
-        print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj['size_MB']}MB)...")
+    
+    if read_distribution == "pareto":
+        total_benchmark_reads = sum(obj["benchmark_reads"] for obj in top_25)
+        # Generate Zipfian weights (1/rank^alpha)
+        alpha = 1.35
+        weights = [1.0 / ((i + 1) ** alpha) for i in range(top_25_count)]
+        sampled_objects = rnd.choices(top_25, weights=weights, k=total_benchmark_reads)
         
-        for r_idx in range(read_budget):
+        current_reads_per_obj = {obj["id"]: obj["reads"] for obj in top_25}
+        for r_idx, obj in enumerate(sampled_objects):
+            obj_id = obj["id"]
+            current_reads_per_obj[obj_id] += 1
             try:
                 t0 = time.time()
                 client.get(key=obj_id)
                 t1 = time.time()
                 read_latencies.append(t1 - t0)
-                benchmark_mb_read += obj["size_MB"]
+                benchmark_mb_read += obj.get("size_MB", 1)
                 time.sleep(sample_read_delay(rnd) * delay_factor)
             except Exception as e:
                 failed_benchmark_reads += 1
                 
-            # NEW: Add barriers during benchmarking to allow PR LB to distribute reads
-            if enable_kagio_phase3 and not skip_barriers and (r_idx + 1) % max(10, read_budget // 5) == 0:
-                print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{read_budget} reads...")
-                wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=max(5, int(15 * delay_factor)))
+            if enable_kagio_phase3 and not skip_barriers and (r_idx + 1) % max(10, total_benchmark_reads // 5) == 0:
+                print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{total_benchmark_reads} total reads...")
+                wait_for_all_kagio_sync(kagio_host, current_reads_per_obj, timeout=max(5, int(15 * delay_factor)))
+    else:
+        # Sequential distribution (original logic)
+        for idx, obj in enumerate(top_25):
+            obj_id = obj["id"]
+            read_budget = obj["benchmark_reads"]
+            
+            last_bench_reads = read_budget
+            print(f"[{idx+1}/{top_25_count}] Benchmarking {obj_id} ({read_budget} reads, size={obj.get('size_MB', 1)}MB)...")
+            
+            for r_idx in range(read_budget):
+                try:
+                    t0 = time.time()
+                    client.get(key=obj_id)
+                    t1 = time.time()
+                    read_latencies.append(t1 - t0)
+                    benchmark_mb_read += obj.get("size_MB", 1)
+                    time.sleep(sample_read_delay(rnd) * delay_factor)
+                except Exception as e:
+                    failed_benchmark_reads += 1
+                    
+                if enable_kagio_phase3 and not skip_barriers and (r_idx + 1) % max(10, read_budget // 5) == 0:
+                    print(f"     -> PR barrier: waiting for KAGIO after {r_idx+1}/{read_budget} reads...")
+                    wait_for_kagio_sync(kagio_host, obj_id, obj["reads"] + r_idx + 1, timeout=max(5, int(15 * delay_factor)))
             
     t_end = time.time()
     perf_time = round(t_end - t_start, 2)
@@ -562,6 +587,7 @@ def main():
     parser.add_argument("--max-warmup-reads", type=int, default=20, help="Maximum warmup reads per object")
     parser.add_argument("--delay-factor", type=float, default=1.0, help="Multiplier for read delays and artificial sleeps")
     parser.add_argument("--kagio-timeout", type=int, default=90, help="Maximum wait time in seconds for KAGIO sync barriers")
+    parser.add_argument("--read-distribution", type=str, choices=["sequential", "pareto"], default="sequential", help="Distribution of reads during Phase 3 Benchmark")
     args = parser.parse_args()
     
     # Load existing results to update them instead of wiping if only running specific tests
@@ -598,7 +624,8 @@ def main():
         "skip_barriers": args.skip_barriers,
         "build_containers": should_build(),
         "runner": args.runner,
-        "rnd": rnd
+        "rnd": rnd,
+        "read_distribution": args.read_distribution
     }
 
     for _ in range(args.num_objects):

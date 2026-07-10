@@ -69,8 +69,8 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
     print(f"Nodes with UF values: {nodes}", flush=True)  # Debugging output to see the UF values before sorting
 
     # Simulator weights
-    pr_weight = 0.5
-    uf_weight = 0.5
+    pr_weight = 0.75
+    uf_weight = 0.25
     total_w = uf_weight + pr_weight
     w_uf_default = uf_weight / total_w
     w_pr_default = pr_weight / total_w
