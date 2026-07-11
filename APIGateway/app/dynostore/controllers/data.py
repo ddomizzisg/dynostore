@@ -198,6 +198,7 @@ class DataController:
                                0].replace("c", "")) - 1
             except Exception:
                 chunk_id = 0
+                
         if "_r" in key_object:
             try:
                 rep_num = key_object.split("_r")[1]
@@ -308,7 +309,8 @@ class DataController:
                 cache = getattr(DataController, "_kagio_pr_cache", {})
                 cache_time = getattr(DataController, "_kagio_pr_cache_time", 0.0)
                 print(f"Using KAGIO for PageRank; cache_time={cache_time}, current_time={time.time()}, diff={time.time() - cache_time}", flush=True)
-                if time.time() - cache_time < 5.0:
+                cache_ttl = float(os.getenv("KAGIO_PR_CACHE_TTL", "1.0"))
+                if time.time() - cache_time < cache_ttl:
                     pr_scores = cache
                 else:
                     try:
@@ -354,13 +356,12 @@ class DataController:
                     server_id = route.get("chunk", {}).get("server_id")
                     if server_id is not None:
                         dc_name = f"datacontainer{server_id}"
-                        pr_value = pr_scores.get(dc_name, 999.0)
-                        print(pr_scores, flush=True)
-                        print(f"PR for {dc_name} {server_id}: {pr_value}", flush=True)
-                        return pr_value
-                    return 999.0
+                        pr = pr_scores.get(dc_name, 999.0)
+                    else:
+                        pr = 999.0
                 except Exception:
-                    return 999.0
+                    pr = 999.0
+                return (not route.get("is_replica", False), pr)
 
             # Group by chunk id for robust fallbacks
             routes_by_cid = {}
@@ -382,7 +383,6 @@ class DataController:
                 async def fetch_with_fallback(cid):
                     chunk_routes = routes_by_cid.get(cid, [])
                     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                        # Sort by ascending PR so we query the least congested container first
                         chunk_routes.sort(key=get_pr)
                     else:
                         random.shuffle(chunk_routes)

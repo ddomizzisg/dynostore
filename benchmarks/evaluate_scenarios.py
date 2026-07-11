@@ -234,18 +234,20 @@ def collect_metrics(kagio_host, enable_kagio=False):
 def wait_for_kagio_sync(kagio_host, target_obj_id, target_indegree, timeout=60):
     print(f"--- Waiting for KAGIO to sync object {target_obj_id} to indegree {target_indegree} ---")
     start_time = time.time()
-    # Usually kagio_host is http://IP:8080. If it's a foxx URL, we adjust. But evaluate_scenarios uses 8080.
     url = f"{kagio_host}/metadata/indegree"
     while time.time() - start_time < timeout:
         try:
             resp = requests.get(url, timeout=2)
             if resp.status_code == 200:
                 data = resp.json()
+                current_sum = 0
                 for item in data:
-                    if target_obj_id in item.get("metadata_id", ""):
-                        if item.get("indegree", 0) >= target_indegree:
-                            print(f"  -> Sync achieved in {round(time.time() - start_time, 2)} seconds!")
-                            return True
+                    meta_id = item.get("metadata_id", "")
+                    if target_obj_id == meta_id or f"{target_obj_id}_r2" == meta_id or f"metadata_{target_obj_id}" == meta_id or f"metadata_{target_obj_id}_r2" == meta_id:
+                        current_sum += item.get("indegree", 0)
+                if current_sum >= target_indegree:
+                    print(f"  -> Sync achieved in {round(time.time() - start_time, 2)} seconds!")
+                    return True
         except Exception:
             pass
         time.sleep(1)
@@ -263,11 +265,13 @@ def wait_for_all_kagio_sync(kagio_host, targets, timeout=60):
                 data = resp.json()
                 satisfied = 0
                 for obj_id, target_indegree in targets.items():
+                    current_sum = 0
                     for item in data:
-                        if obj_id in item.get("metadata_id", ""):
-                            if item.get("indegree", 0) >= target_indegree:
-                                satisfied += 1
-                            break
+                        meta_id = item.get("metadata_id", "")
+                        if obj_id == meta_id or f"{obj_id}_r2" == meta_id or f"metadata_{obj_id}" == meta_id or f"metadata_{obj_id}_r2" == meta_id:
+                            current_sum += item.get("indegree", 0)
+                    if current_sum >= target_indegree:
+                        satisfied += 1
                 if satisfied == len(targets):
                     print(f"  -> All {len(targets)} objects synced in {round(time.time() - start_time, 2)} seconds!")
                     return True
@@ -291,7 +295,7 @@ def wait_for_pagerank_update(kagio_host, old_pr, timeout=30):
     print("  -> Warning: KAGIO PageRanks did not change within timeout.")
     return False
 
-def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None, read_distribution="sequential"):
+def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None, read_distribution="sequential", target_percentage=25):
     if enable_kagio_phase3 is None:
         enable_kagio_phase3 = enable_kagio_phase1
 
@@ -435,13 +439,47 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
         return base + (size_factor * 5.0)
 
     top_objects = sorted(objects, key=hotness_score, reverse=True)
-    top_25_count = max(1, int(len(top_objects) * 0.25))
+    top_25_count = max(1, int(len(top_objects) * (target_percentage / 100.0)))
     top_25 = top_objects[:top_25_count]
 
     print(top_objects)
-    print(top_25)  # Debugging output to see the top 25% objects selected for benchmarking
+    print(top_25)  # Debugging output to see the targeted objects selected for benchmarking
     
-    print(f"Targeting top {top_25_count} objects with a {read_distribution.upper()} read pattern...")
+    print("\n--- Calculating precise baseline reads for benchmarked objects ---")
+    benchmark_baseline_reads = {f"datacontainer{i}": 0 for i in range(1, 11)}
+    try:
+        for obj in top_25:
+            resp = requests.get(f"http://localhost:8095/storage/internal/{obj['id']}", timeout=2)
+            if resp.status_code == 200:
+                meta = resp.json()
+                nodes = meta.get("nodes", [])
+                if nodes:
+                    n_chunks = len(nodes)
+                    k_chunks = meta.get("metadata", {}).get("required_chunks", max(1, n_chunks - 2))
+                    reads_per_chunk = obj["benchmark_reads"] * k_chunks / n_chunks
+                    for node in nodes:
+                        server_id = node.get("chunk", {}).get("server_id")
+                        if server_id is not None:
+                            dc_name = f"datacontainer{server_id}"
+                            if dc_name in benchmark_baseline_reads:
+                                benchmark_baseline_reads[dc_name] += reads_per_chunk
+                else:
+                    print(f"Warning: No nodes found for object {obj['id']}. Meta: {meta}")
+            else:
+                print(f"Warning: Metadata query failed for object {obj['id']} with status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"Failed to calculate baseline: {e}")
+        
+    print(f"Computed baseline reads per container: {benchmark_baseline_reads}")
+    try:
+        if top_25:
+            first_obj = top_25[0]
+            resp = requests.get(f"http://localhost:8095/storage/internal/{first_obj['id']}", timeout=2)
+            print(f"DEBUG FIRST OBJ [{first_obj['id']}]: status={resp.status_code} body={resp.text}")
+    except Exception as e:
+        print(f"DEBUG ERROR: {e}")
+    
+    print(f"Targeting top {top_25_count} objects ({target_percentage}%) with a {read_distribution.upper()} read pattern...")
     
     t_start = time.time()
     
@@ -456,6 +494,10 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
         for r_idx, obj in enumerate(sampled_objects):
             obj_id = obj["id"]
             current_reads_per_obj[obj_id] += 1
+            
+            if r_idx % max(10, total_benchmark_reads // 10) == 0:
+                print(f"[{r_idx+1}/{total_benchmark_reads}] Benchmarking random pareto object {obj_id} (size={obj.get('size_MB', 1)}MB)...")
+                
             try:
                 t0 = time.time()
                 client.get(key=obj_id)
@@ -507,10 +549,20 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
     print("\n--- Phase 4: Collecting Metrics ---")
     metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase3)
     
-    # Calculate PageRank variation
+    # Calculate PageRank variation and request breakdown
     requests_list = []
     for dc, data in metrics.items():
         requests_list.append(data.get("requests_attended", 0))
+        
+        before_data = metrics_before_repl.get(dc, {})
+        req_before = before_data.get("requests_attended", 0)
+        req_total = data.get("requests_attended", 0)
+        req_after = max(0, req_total - req_before)
+        
+        data["requests_before_replication_all"] = req_before
+        data["requests_before_replication_benchmark_objs"] = benchmark_baseline_reads.get(dc, 0)
+        data["requests_after_replication"] = req_after
+        
         data["pagerank_before"] = pr_before.get(dc, 0.0)
         data["pagerank_after"] = data.pop("pagerank")  # Rename for clarity
         data["pagerank_variation"] = data["pagerank_after"] - data["pagerank_before"]
@@ -588,6 +640,8 @@ def main():
     parser.add_argument("--delay-factor", type=float, default=1.0, help="Multiplier for read delays and artificial sleeps")
     parser.add_argument("--kagio-timeout", type=int, default=90, help="Maximum wait time in seconds for KAGIO sync barriers")
     parser.add_argument("--read-distribution", type=str, choices=["sequential", "pareto"], default="sequential", help="Distribution of reads during Phase 3 Benchmark")
+    parser.add_argument("--target-percentage", type=float, default=100, help="Percentage of objects to target during benchmarking (1-100)")
+    parser.add_argument("--equal-reads", action="store_true", help="Force benchmark reads to exactly equal warming reads per object")
     args = parser.parse_args()
     
     # Load existing results to update them instead of wiping if only running specific tests
@@ -611,40 +665,31 @@ def main():
             return True
         return False
     
-    # Pre-generate deterministic workload globally
-    print("Pre-generating deterministic workload...")
-    rnd = random.Random(args.seed)
-    client_regions = ["eu-west", "us-east", "us-west", "ap-south"]
-    region_weights = [0.40, 0.30, 0.20, 0.10]
-    global_workload = []
-    
-    kwargs = {
-        "delay_factor": args.delay_factor,
-        "kagio_timeout": args.kagio_timeout,
-        "skip_barriers": args.skip_barriers,
-        "build_containers": should_build(),
-        "runner": args.runner,
-        "rnd": rnd,
-        "read_distribution": args.read_distribution
-    }
-
-    for _ in range(args.num_objects):
-        region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
-        size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=args.max_size_mb, alpha=1.35)
-        # Seed deterministic UUIDs so they are identical across multiple script runs if seed matches
-        obj_id = str(uuid.UUID(int=rnd.getrandbits(128)))
-        times = sample_read_count(rnd, min_reads=1, max_reads=args.max_warmup_reads, alpha=1.18)
-        
-        base_budget = max(args.benchmark_reads, 1)
-        b_reads = int(sample_pareto(rnd, alpha=1.18, scale=max(base_budget * 2.5, 5.0), min_value=base_budget, max_value=base_budget * 12))
-        
-        global_workload.append({
-            "id": obj_id,
-            "reads": times,
-            "size_MB": size_MB,
-            "region": region,
-            "benchmark_reads": b_reads
-        })
+    def generate_workload():
+        rnd = random.Random()  # Use system time for unique UUIDs across script runs
+        client_regions = ["eu-west", "us-east", "us-west", "ap-south"]
+        region_weights = [0.40, 0.30, 0.20, 0.10]
+        workload = []
+        for i in range(args.num_objects):
+            region = rnd.choices(client_regions, weights=region_weights, k=1)[0]
+            size_MB = sample_object_size_mb(rnd, min_mb=1, max_mb=args.max_size_mb, alpha=1.35)
+            obj_id = str(uuid.uuid4())  # Generate a completely new UUID
+            times = sample_read_count(rnd, min_reads=1, max_reads=args.max_warmup_reads, alpha=1.18)
+            
+            base_budget = max(args.benchmark_reads, 1)
+            if getattr(args, "equal_reads", False):
+                b_reads = times
+            else:
+                b_reads = int(sample_pareto(rnd, alpha=1.18, scale=max(base_budget * 5.0, 10.0), min_value=base_budget * 3, max_value=base_budget * 20))
+            
+            workload.append({
+                "id": obj_id,
+                "reads": times,
+                "size_MB": size_MB,
+                "region": region,
+                "benchmark_reads": b_reads
+            })
+        return workload
 
     def save_results(target_file, is_interim=False):
         final_results = []
@@ -659,24 +704,36 @@ def main():
         elif is_interim:
             print(f"Interim report saved to {target_file}")
 
+    def get_kwargs():
+        return {
+            "delay_factor": args.delay_factor,
+            "kagio_timeout": args.kagio_timeout,
+            "skip_barriers": args.skip_barriers,
+            "build_containers": should_build(),
+            "runner": args.runner,
+            "rnd": random.Random(),
+            "read_distribution": args.read_distribution,
+            "target_percentage": args.target_percentage
+        }
+
     try:
         if "all" in tests_to_run or "1" in tests_to_run:
-            res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio_phase1=False, enable_replicator=False, workload=global_workload, **kwargs)
+            res = run_scenario("Utilization Factor LB (Standalone, No Replication)", enable_kagio_phase1=False, enable_replicator=False, workload=generate_workload(), **get_kwargs())
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
             
         if "all" in tests_to_run or "2" in tests_to_run:
-            res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio_phase1=True, enable_replicator=False, workload=global_workload, **kwargs)
+            res = run_scenario("PageRank LB (KAGIO-enabled, No Replication)", enable_kagio_phase1=True, enable_replicator=False, workload=generate_workload(), **get_kwargs())
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
             
         if "all" in tests_to_run or "3" in tests_to_run:
-            res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio_phase1=True, enable_replicator=True, workload=global_workload, **kwargs)
+            res = run_scenario("PageRank LB (KAGIO-enabled, With Replication)", enable_kagio_phase1=True, enable_replicator=True, workload=generate_workload(), **get_kwargs())
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
 
         if "all" in tests_to_run or "4" in tests_to_run:
-            res = run_scenario("Hybrid (UF Warmup, Replicate, PR Benchmark)", enable_kagio_phase1=False, enable_replicator=True, enable_kagio_phase3=True, workload=global_workload, **kwargs)
+            res = run_scenario("Hybrid (UF Warmup, Replicate, PR Benchmark)", enable_kagio_phase1=False, enable_replicator=True, enable_kagio_phase3=True, workload=generate_workload(), **get_kwargs())
             new_results.append(res)
             if args.save_interim: save_results("evaluation_report_interim.json", is_interim=True)
     except Exception as e:

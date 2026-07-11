@@ -105,7 +105,25 @@ def sort_nodes_degree_aware(nodes: list[dict], file_size: float, indegree: int =
 
         print(f"Sorted nodes by score: {[node for node in nodes]}", flush=True)  # Debugging output to see the sorted scores
     else:
-        nodes.sort(key=lambda x: x["uf"])
+        lb_algo = os.getenv("LOAD_BALANCER", "default").lower()
+        if lb_algo == "two_choices":
+            selected = []
+            pool = list(nodes)
+            while pool:
+                if len(pool) == 1:
+                    selected.append(pool[0])
+                    pool.pop(0)
+                else:
+                    c1, c2 = random.sample(pool, 2)
+                    if c1["uf"] <= c2["uf"]:
+                        winner = c1
+                    else:
+                        winner = c2
+                    selected.append(winner)
+                    pool.remove(winner)
+            nodes[:] = selected
+        else:
+            nodes.sort(key=lambda x: x["uf"])
 
 def allocate_single(db: Session, file_model, nodes: list[dict], token_user: str, userImpactFactor=0.1, excluded_nodes: list[int] = None, indegree: int = 0):
     if excluded_nodes:
