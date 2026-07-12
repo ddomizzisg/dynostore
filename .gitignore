@@ -37,3 +37,15 @@ data/*
 benchmarks/a.txt
 APIGateway/data/app.db
 datacontainer/code/*.db
+benchmarks/75pr25uf/*
+benchmarks/50pr50uf/*
+metadata/app/metadata.db
+APIGateway/app/logs/*
+logsapi.txt
+benchmarks/*.json
+benchmarks/evaluation_report.jsonold2
+benchmarks/evaluation_report.jsonold
+benchmarks/lastrepchunks/*
+benchmarks/summary.py
+benchmarks/hybrid_pagerank_redistribution.pdf
+benchmarks/hybrid_pagerank_redistribution_data.csv

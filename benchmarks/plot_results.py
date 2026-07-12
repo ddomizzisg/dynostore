@@ -8,14 +8,32 @@ def load_data(filepath="evaluation_report.json"):
         print(f"Error: {filepath} not found. Please run evaluate_scenarios.py first.")
         return None
     with open(filepath, 'r') as f:
-        return json.load(f)
+        data = json.load(f)
+    
+    # Normalize PageRank values per scenario
+#     for scenario in data:
+#         metrics = scenario.get('container_metrics', {})
+#
+#         sum_before = sum(metrics[c].get('pagerank_before', 0) for c in metrics)
+#         sum_after = sum(metrics[c].get('pagerank_after', 0) for c in metrics)
+#
+#         for c, m in metrics.items():
+#             norm_before = m.get('pagerank_before', 0) / sum_before if sum_before > 0 else 0
+#             norm_after = m.get('pagerank_after', 0) / sum_after if sum_after > 0 else 0
+#
+#             m['pagerank_before'] = norm_before
+#             m['pagerank_after'] = norm_after
+#             m['pagerank_variation'] = norm_after - norm_before
+            
+    return data
 
 def plot_performance(data):
     scenarios = [d['scenario'] for d in data]
     times = [d['performance_time_seconds'] for d in data]
     
     plt.figure(figsize=(10, 6))
-    bars = plt.bar(scenarios, times, color=['#4C72B0', '#55A868', '#C44E52'])
+    colors = ['#4C72B0', '#55A868', '#C44E52', '#8172B3', '#CCB974']
+    bars = plt.bar(scenarios, times, color=colors[:len(scenarios)])
     plt.title('Benchmark Performance Time per Scenario')
     plt.ylabel('Time (Seconds)')
     plt.xticks(rotation=15)
@@ -132,12 +150,23 @@ def plot_user_latencies(data):
     plt.close()
 
 def plot_throughput(data):
-    scenarios = [d['scenario'] for d in data if 'throughput' in d]
+    scenarios = [d['scenario'] for d in data if 'user_latencies' in d]
     if not scenarios: return
     
-    read_tp = [d['throughput'].get('read_throughput_mb_s', 0) for d in data if 'throughput' in d]
-    write_tp = [d['throughput'].get('write_throughput_mb_s', 0) for d in data if 'throughput' in d]
+    read_tp = []
+    write_tp = []
     
+    for d in data:
+        if 'user_latencies' in d:
+            rl = d['user_latencies'].get('read_latencies_seconds', [])
+            wl = d['user_latencies'].get('write_latencies_seconds', [])
+            
+            rt = len(rl) / sum(rl) if sum(rl) > 0 else 0
+            wt = len(wl) / sum(wl) if sum(wl) > 0 else 0
+            
+            read_tp.append(rt)
+            write_tp.append(wt)
+            
     x = np.arange(len(scenarios))
     width = 0.35
     
@@ -146,7 +175,7 @@ def plot_throughput(data):
     plt.bar(x + width/2, write_tp, width, label='Write Throughput', color='#55A868')
     
     plt.title('Read/Write Throughput per Scenario')
-    plt.ylabel('Throughput (MB/s)')
+    plt.ylabel('Throughput (Ops/s)')
     plt.xticks(x, [s.replace(' ', '\n') for s in scenarios])
     plt.legend()
     plt.tight_layout()
@@ -195,6 +224,66 @@ def plot_replication_overhead(data):
     plt.savefig('plot_replication_overhead.png')
     plt.close()
 
+def plot_reads_before_after(data):
+    containers = [f"datacontainer{i}" for i in range(1, 11)]
+    x = np.arange(len(containers))
+    width = 0.35
+
+    for scenario in data:
+        metrics = scenario.get('container_metrics', {})
+        before = [metrics.get(c, {}).get('requests_before_replication_benchmark_objs', 0) for c in containers]
+        after = [metrics.get(c, {}).get('requests_after_replication', 0) for c in containers]
+
+        if sum(before) + sum(after) == 0:
+            continue
+
+        plt.figure(figsize=(14, 7))
+        plt.bar(x - width/2, before, width, label='Reads Before Replication (Calculated Baseline)', color='#4C72B0')
+        plt.bar(x + width/2, after, width, label='Reads After Replication (Benchmark)', color='#C44E52')
+
+        plt.title(f"Reads Before vs After Replication - {scenario['scenario']}")
+        plt.xlabel('Data Containers')
+        plt.ylabel('Number of Reads')
+        plt.xticks(x, [c.replace('datacontainer', 'DC-') for c in containers])
+        plt.legend()
+        plt.tight_layout()
+
+        safe_name = scenario['scenario'].replace(" ", "_").replace("(", "").replace(")", "").replace(",", "").lower()
+        filename = f'plot_reads_before_after_{safe_name}.png'
+        plt.savefig(filename)
+        print(f" -> Saved {filename}")
+        plt.close()
+
+def plot_benchmark_reads_per_container(data):
+    containers = [f"datacontainer{i}" for i in range(1, 11)]
+    x = np.arange(len(containers))
+    width = 0.35
+
+    for scenario in data:
+        metrics = scenario.get('container_metrics', {})
+        before = [metrics.get(c, {}).get('requests_before_replication_benchmark_objs', 0) for c in containers]
+        after = [metrics.get(c, {}).get('requests_after_replication', 0) for c in containers]
+
+        if sum(before) + sum(after) == 0:
+            continue
+
+        plt.figure(figsize=(14, 7))
+        plt.bar(x - width/2, before, width, label='Before Repl (Phase 1 for Top 25%)', color='#4C72B0')
+        plt.bar(x + width/2, after, width, label='After Repl (Phase 3 for Top 25%)', color='#C44E52')
+
+        plt.title(f"Reads Per Container strictly for Benchmarked Objects - {scenario['scenario']}")
+        plt.xlabel('Data Containers')
+        plt.ylabel('Number of Reads')
+        plt.xticks(x, [c.replace('datacontainer', 'DC-') for c in containers])
+        plt.legend()
+        plt.tight_layout()
+
+        safe_name = scenario['scenario'].replace(" ", "_").replace("(", "").replace(")", "").replace(",", "").lower()
+        filename = f'plot_benchmark_reads_{safe_name}.png'
+        plt.savefig(filename)
+        print(f" -> Saved {filename}")
+        plt.close()
+
 def main():
     data = load_data()
     if not data:
@@ -237,6 +326,9 @@ def main():
     
     plot_pagerank_before_after(data)
     
+    plot_reads_before_after(data)
+    plot_benchmark_reads_per_container(data)
+    
     plot_grouped_container_metric(
         data, 
         'pagerank_after', 
@@ -251,7 +343,7 @@ def main():
         print(" -> Saved plot_read_latencies.png")
         print(" -> Saved plot_write_latencies.png")
         
-    if any('throughput' in d for d in data):
+    if any('user_latencies' in d for d in data):
         plot_throughput(data)
         print(" -> Saved plot_throughput.png")
         

@@ -224,8 +224,7 @@ class DataController:
     @staticmethod
     async def pull_data(token_user, key_object, metadata_service, force_refresh=False):
         t_total = _t0()
-        _log("debug", "PULL", key_object, "START", "INIT",
-             f"user={token_user};force_refresh={force_refresh}")
+        
         decode_start = time.perf_counter_ns()
         timeline_path = f".temp/{key_object}.timeline.json"
         timeline = {}
@@ -242,6 +241,8 @@ class DataController:
             except Exception as e:
                 _log("warning", "CACHE_UPDATE_MTIME", key_object, "END", "ERROR", f"msg={e}")
 
+            _log("debug", "PULL", key_object, "START", "INIT",
+                 f"user={token_user};force_refresh={force_refresh}")
             _log("debug", "PULL", key_object, "END", "CACHE_HIT",
                  f"path={cache_path};bytes={len(obj)};read_time_ms={_ms_since(t_read):.3f};total_time_ms={_ms_since(t_total):.3f}")
             timeline["pull_end"] = time.time_ns()
@@ -260,6 +261,8 @@ class DataController:
                 t_read = _t0()
                 with open(object_path, "rb") as f:
                     obj = f.read()
+                _log("debug", "PULL", key_object, "START", "INIT",
+                     f"user={token_user};force_refresh={force_refresh}")
                 _log("debug", "PULL", key_object, "END", "PENDING_SERVED",
                      f"path={object_path};bytes={len(obj)};read_time_ms={_ms_since(t_read):.3f};total_time_ms={_ms_since(t_total):.3f}")
                 timeline["pull_end"] = time.time_ns()
@@ -291,6 +294,13 @@ class DataController:
             return {"error": str(e)}, 500
         
         metadata_object = result['data']['file']
+        
+        # If the metadata service redirected to a replica, update key_object for subsequent logs
+        key_object = metadata_object.get('keyfile', key_object)
+        
+        _log("debug", "PULL", key_object, "START", "INIT",
+             f"user={token_user};force_refresh={force_refresh}")
+        
         metadata_retrieval_end = time.perf_counter_ns()
         _log("debug", "PULL_METADATA", key_object, "END", "SUCCESS",
              f"routes={len(routes)};is_encrypted={metadata_object.get('is_encrypted')};"

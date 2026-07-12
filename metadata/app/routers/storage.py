@@ -328,8 +328,10 @@ async def pull_file(tokenuser: str, keyfile: str, db: Session = Depends(get_db))
             replica_data = await locate(db, tokenuser, replica_model, all_chunks=True)
             for r in replica_data.get("routes", []):
                 r["is_replica"] = True
-            if "routes" in data:
-                data["routes"].extend(replica_data.get("routes", []))
+            
+            # REDIRECT to copy: replace the original routes with the replica routes
+            data["routes"] = replica_data.get("routes", [])
+            file_model = replica_model
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
