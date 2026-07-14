@@ -419,7 +419,7 @@ async def listCatalogFiles(tokenuser, catalog):
 async def getSubscribedCatalogsRoute(tokenuser):
     return CatalogController.getSubscribedCatalogs(PUB_SUB_HOST, tokenuser)
 
-@app.route('/pubsub/<tokenuser>/catalog/<father>/results', methods=["GET"])
+@app.route('/pubsub/<tokenuser>/catalog/<father>/children', methods=["GET"])
 @validateToken(auth_host=AUTH_HOST)
 async def getSubCatalogsRoute(tokenuser, father):
     return CatalogController.getSubCatalogs(PUB_SUB_HOST, father)

@@ -761,8 +761,11 @@ class DataController:
         # catalog: create or get
         catalog_start = time.time_ns()
         perf_catalog_start = time.perf_counter_ns()
+        print(f"Catalog: {catalog.split("_")}", flush=True)
+        catalog_father,catalog_name = catalog.split("_") if "_" in catalog else ("/",catalog)
+        print(f"Catalog name: {catalog}, Father: {catalog_father}", flush=True)
         catalog_result, status = CatalogController.createOrGetCatalog(
-            request, pubsub_service, catalog, token_user
+            request, pubsub_service, catalog, token_user, fathers_token=catalog_father
         )
         perf_catalog_end = time.perf_counter_ns()
         catalog_end = time.time_ns()

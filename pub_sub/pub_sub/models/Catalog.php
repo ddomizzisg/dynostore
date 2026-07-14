@@ -154,6 +154,35 @@ class Catalog extends REST
                 }
             } else {
                 $father = $this->tokenFatherCExist($fatherstoken);
+                
+                if (!$father) {
+                    # Father does not exist, create a new catalog with the given father name
+                    $father_name = $fatherstoken; // Assuming the father token is actually the name
+                    $father_keycatalog = $this->generateToken();
+                    $father_tokenC = $this->generateSHA256Token();
+                    $father_data = $db->newCatalog(
+                        $father_keycatalog,
+                        $father_tokenC,
+                        $father_name,
+                        $tokenuser,
+                        $dispersemode,
+                        $encryption,
+                        '/',
+                        $group,
+                        $processed
+                    );
+                    if ($father_data) {
+                        $status = 'Owner';
+                        $db->insertUsers_Catalogs($tokenuser, $father_tokenC, $status);
+                        $fatherstoken = $father_tokenC; // Update fatherstoken to the newly created father's token
+                    } else {
+                        $msg = array("message" => "Cannot create father catalog.");
+                        $this->response($this->json($msg), 404);
+                    }  
+                }else {
+                    $fatherstoken = $father['tokencatalog']; // Use the existing father's token
+                }
+                
                 $data = $db->newCatalog(
                     $keycatalog,
                     $tokenC,
@@ -244,8 +273,10 @@ class Catalog extends REST
         $db = new DbHandler();
         $data = $db->tokenFatherCExist($father);
         if (!$data) {
-            $msg['message'] = "Invalid data.";
-            $this->response($this->json($msg), 400);
+            #$msg['message'] = "Invalid data 2.";
+            #$this->response($this->json($msg), 400);
+            # Father does not exist, create a new catalog with the given father name
+            return false;
         } else {
             return $data;
         }

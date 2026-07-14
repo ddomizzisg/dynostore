@@ -225,6 +225,7 @@ class DbHandler {
 
 		try {
 			$sql = "SELECT token_file FROM catalogs_files WHERE tokencatalog=?;";
+			
 			$stmt = $this->db->prepare($sql);
 			$stmt->bindParam(1, $key, PDO::PARAM_STR);
 			$stmt->execute();
@@ -233,7 +234,7 @@ class DbHandler {
 			if ($stmt->rowCount()>0) {
 				$res = $stmt->fetchAll(PDO::FETCH_ASSOC);
 			} else {
-				$res = false;
+				$res = array();
 			}
 			$stmt = null;
 			return $res;
@@ -1168,9 +1169,10 @@ class DbHandler {
 
 	public function tokenFatherCExist($key) {
 		try {
-			$sql = "SELECT * FROM catalogs WHERE tokencatalog=:kc;";
+			$sql = "SELECT tokencatalog FROM catalogs WHERE tokencatalog=:kc or namecatalog=:kc2;";
 			$stmt = $this->db->prepare($sql);
 			$stmt->bindParam(":kc", $key, PDO::PARAM_STR);
+			$stmt->bindParam(":kc2", $key, PDO::PARAM_STR);
 			$stmt->execute();
 			if ($stmt->rowCount() == 1) {
 				$res = $stmt->fetch(PDO::FETCH_ASSOC);

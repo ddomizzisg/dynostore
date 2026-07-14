@@ -54,9 +54,10 @@ async def force_replication_cycle():
             logger.error(f"Error fetching indegree from KAGIO: {e}")
             object_reads = []
 
-        # Sort by indegree descending and take top 25
+        # Sort by indegree descending and take top 25% of objects
         object_reads.sort(key=lambda x: x.get("indegree", 0), reverse=True)
-        top_objects = object_reads[:25]
+        num_to_replicate = max(1, int(len(object_reads) * 0.25))
+        top_objects = object_reads[:num_to_replicate]
 
         for obj_degree in top_objects:
             n_reads = obj_degree.get("indegree", 0)
