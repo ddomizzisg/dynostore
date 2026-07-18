@@ -49,3 +49,7 @@ benchmarks/lastrepchunks/*
 benchmarks/summary.py
 benchmarks/hybrid_pagerank_redistribution.pdf
 benchmarks/hybrid_pagerank_redistribution_data.csv
+benchmarks/resultadosc3/sim2/*.pdf
+benchmarks/simulador/simulador/pruebas16julio/*
+benchmarks/simulador/*
+benchmarks/resultadosc3/*

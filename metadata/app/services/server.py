@@ -201,10 +201,14 @@ def locate_single(db: Session, token_user: str, file_model):
     if nodes:
         if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
             pr_map = get_kagio_pageranks()
-            # Prefer HIGHER PageRank containers for reads so traffic is spread away from the hottest/low-PR replicas.
-            print(f"PR Map for locating single: {pr_map}", flush=True)  # Debugging output to see the PageRank values
-            nodes.sort(key=lambda x: pr_map.get(x[1].id, float("-inf")), reverse=True)
-        fis, srv = nodes[0]
+            # Probabilistic routing based on inverse PageRank to prefer LOW PR containers (less accessed)
+            print(f"PR Map for locating single: {pr_map}", flush=True)
+            # Inverse weighting: lower PR gives higher weight
+            weights = [1.0 / max(pr_map.get(x[1].id, 1e-9), 1e-9) for x in nodes]
+            fis, srv = random.choices(nodes, weights=weights, k=1)[0]
+        else:
+            import random
+            fis, srv = random.choice(nodes)
         result.append({"route": f"{srv.url}/objects/{file_model.keyfile}/{token_user}"})
     return result
 

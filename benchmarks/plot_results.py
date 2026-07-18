@@ -1,5 +1,6 @@
 import json
 import os
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -285,7 +286,11 @@ def plot_benchmark_reads_per_container(data):
         plt.close()
 
 def main():
-    data = load_data()
+    parser = argparse.ArgumentParser(description="Plot benchmark results")
+    parser.add_argument("filepath", nargs="?", default="evaluation_report.json", help="Path to the JSON results file")
+    args = parser.parse_args()
+    
+    data = load_data(args.filepath)
     if not data:
         return
         

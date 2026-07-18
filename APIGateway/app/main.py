@@ -568,6 +568,14 @@ async def initialize_default_organization():
     # Run as a background task to not block server startup
     asyncio.create_task(create_org())
 
+@app.before_serving
+async def start_kagio_pr_updater():
+    if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
+        import asyncio
+        from dynostore.controllers.data import DataController
+        print("Starting KAGIO PR background updater...", flush=True)
+        asyncio.create_task(DataController.start_pr_updater_loop())
+
 if __name__ == "__main__":
     import hypercorn.asyncio
     config = Config()

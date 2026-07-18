@@ -547,6 +547,7 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
         time.sleep(5 * delay_factor)
     
     print("\n--- Phase 4: Collecting Metrics ---")
+    time.sleep(65)
     metrics = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase3)
     
     # Calculate PageRank variation and request breakdown
@@ -643,6 +644,9 @@ def main():
     parser.add_argument("--target-percentage", type=float, default=100, help="Percentage of objects to target during benchmarking (1-100)")
     parser.add_argument("--equal-reads", action="store_true", help="Force benchmark reads to exactly equal warming reads per object")
     args = parser.parse_args()
+    
+    if getattr(args, 'equal_reads', False):
+        args.read_distribution = "sequential"
     
     # Load existing results to update them instead of wiping if only running specific tests
     report_file = "evaluation_report.json"

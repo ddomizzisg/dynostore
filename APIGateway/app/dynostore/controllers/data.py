@@ -111,6 +111,56 @@ class DataController:
     real_records = RealRecords(dir_data="data/")
     catalog_cache = {}
     CHUNK_SIZE = 64 * 1024  # 64KB
+    _kagio_pr_cache = {}
+    _kagio_pr_cache_time = 0.0
+
+    @classmethod
+    async def start_pr_updater_loop(cls):
+        import asyncio
+        import time
+        from kagio.kagio import KAGIO
+        
+        KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
+        KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
+        KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
+        KAGIO_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
+        
+        try:
+            kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
+        except Exception as e:
+            logger.error(f"Failed to init KAGIO for background updater: {e}")
+            return
+
+        cache_ttl = float(os.getenv("KAGIO_PR_CACHE_TTL", "5.0"))
+        logger.info(f"Started KAGIO PageRank background updater (TTL={cache_ttl}s)")
+        
+        while True:
+            try:
+                pr_list = await asyncio.to_thread(kagio_client.centrality.data_containers_page_rank)
+                pr_scores = {}
+                if hasattr(pr_list, 'data'):
+                    items = pr_list.data
+                elif isinstance(pr_list, list):
+                    items = pr_list
+                else:
+                    items = []
+                    
+                for dc in items:
+                    vertex = dc.get("id", dc.get("vertex", "")).replace("metadata_", "")
+                    num_str = ''.join(filter(str.isdigit, vertex))
+                    if num_str:
+                        num = int(num_str)
+                        dc_name = f"datacontainer{num + 1}" if "dc-" in vertex else f"datacontainer{num}"
+                        pr_scores[dc_name] = dc.get("pagerank", 999.0)
+                    else:
+                        pr_scores[vertex] = dc.get("pagerank", 999.0)
+                        
+                cls._kagio_pr_cache = pr_scores
+                cls._kagio_pr_cache_time = time.time()
+            except Exception as e:
+                logger.error(f"Failed to fetch PageRank in background loop: {e}")
+                
+            await asyncio.sleep(cache_ttl)
 
     @staticmethod
     def evict_cache(max_files=100):
@@ -314,52 +364,8 @@ class DataController:
         try:
             k = metadata_object.get('required_chunks', 1)
             pr_scores = {}
-            print(f"ENABLE_KAGIO={os.getenv('ENABLE_KAGIO', 'true')}", flush=True)
             if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                cache = getattr(DataController, "_kagio_pr_cache", {})
-                cache_time = getattr(DataController, "_kagio_pr_cache_time", 0.0)
-                print(f"Using KAGIO for PageRank; cache_time={cache_time}, current_time={time.time()}, diff={time.time() - cache_time}", flush=True)
-                cache_ttl = float(os.getenv("KAGIO_PR_CACHE_TTL", "1.0"))
-                if time.time() - cache_time < cache_ttl:
-                    pr_scores = cache
-                else:
-                    try:
-                        from kagio.kagio import KAGIO
-                        KAGIO_API_KEY = os.getenv("KAGIO_API_KEY", "my_token")
-                        KAGIO_FOXX_URL = os.getenv("KAGIO_FOXX_URL", "http://kagio-foxx:8529/_db/_system/kagio")
-                        KAGIO_FOXX_DB = os.getenv("KAGIO_FOXX_DB", "_system")
-                        KAGIO_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
-                        print(f"KAGIO_BASE_URL={KAGIO_BASE_URL}, KAGIO_FOXX_URL={KAGIO_FOXX_URL}, KAGIO_FOXX_DB={KAGIO_FOXX_DB}, KAGIO_API_KEY={KAGIO_API_KEY}", flush=True)
-                        kagio_client = KAGIO(base_url=KAGIO_BASE_URL, foxx_url=KAGIO_FOXX_URL, foxx_db=KAGIO_FOXX_DB, api_key=KAGIO_API_KEY)
-                        pr_list = await asyncio.to_thread(kagio_client.centrality.data_containers_page_rank)
-                        print(f"Fetched PageRank from KAGIO: {pr_list}", flush=True)
-                        if hasattr(pr_list, 'data'):
-                            items = pr_list.data
-                        elif isinstance(pr_list, list):
-                            items = pr_list
-                        else:
-                            items = []
-                            
-                        for dc in items:
-                            vertex = dc.get("id", dc.get("vertex", "")).replace("metadata_", "")
-                            num_str = ''.join(filter(str.isdigit, vertex))
-                            if num_str:
-                                num = int(num_str)
-                                # Map dc-0 to datacontainer1
-                                dc_name = f"datacontainer{num + 1}" if "dc-" in vertex else f"datacontainer{num}"
-                                pr_scores[dc_name] = dc.get("pagerank", 999.0)
-                            else:
-                                pr_scores[vertex] = dc.get("pagerank", 999.0)
-                        DataController._kagio_pr_cache = pr_scores
-                        DataController._kagio_pr_cache_time = time.time()
-                    except Exception as e:
-                        try:
-                            import logging
-                            logger = logging.getLogger(__name__)
-                            logger.error(f"Failed to fetch PageRank in pull_data: {e}")
-                        except Exception:
-                            pass
-                        pr_scores = cache
+                pr_scores = getattr(DataController, "_kagio_pr_cache", {})
 
             def get_pr(route):
                 try:
@@ -393,7 +399,12 @@ class DataController:
                 async def fetch_with_fallback(cid):
                     chunk_routes = routes_by_cid.get(cid, [])
                     if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                        chunk_routes.sort(key=get_pr)
+                        # Use weighted random scoring based on PageRank (no local import)
+                        for r in chunk_routes:
+                            pr = get_pr(r)[1]
+                            weight = 1.0 / (pr + 1e-6)
+                            r['_weight'] = random.random() ** (1.0 / weight)
+                        chunk_routes.sort(key=lambda x: x.get('_weight', 0), reverse=True)
                     else:
                         random.shuffle(chunk_routes)
 
@@ -761,8 +772,7 @@ class DataController:
         # catalog: create or get
         catalog_start = time.time_ns()
         perf_catalog_start = time.perf_counter_ns()
-        print(f"Catalog: {catalog.split("_")}", flush=True)
-        catalog_father,catalog_name = catalog.split("_") if "_" in catalog else ("/",catalog)
+        catalog_father,catalog_name = catalog.split("_",1) if "_" in catalog else ("/",catalog)
         print(f"Catalog name: {catalog}, Father: {catalog_father}", flush=True)
         catalog_result, status = CatalogController.createOrGetCatalog(
             request, pubsub_service, catalog, token_user, fathers_token=catalog_father
