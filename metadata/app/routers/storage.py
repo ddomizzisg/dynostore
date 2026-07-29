@@ -318,20 +318,22 @@ async def pull_file(tokenuser: str, keyfile: str, db: Session = Depends(get_db))
         for r in data.get("routes", []):
             r["is_replica"] = False
             
-        # Check for replica
-        replica_model = db.query(File).filter(
-            File.keyfile == keyfile + "_r2",
-            File.removed == False,
-            File.owner == tokenuser
-        ).first()
-        if replica_model:
+        # Check for replicas (_r2, _r3, ... until the first missing level)
+        # and COMBINE routes to load balance between original and replicas.
+        for level in range(2, 12):
+            replica_key = f"{keyfile}_r{level}"
+            replica_model = db.query(File).filter(
+                File.keyfile == replica_key,
+                File.removed == False,
+                File.owner == tokenuser
+            ).first()
+            if not replica_model:
+                break
             replica_data = await locate(db, tokenuser, replica_model, all_chunks=True)
             for r in replica_data.get("routes", []):
                 r["is_replica"] = True
-            
-            # REDIRECT to copy: replace the original routes with the replica routes
-            data["routes"] = replica_data.get("routes", [])
-            file_model = replica_model
+                r["replica_key"] = replica_key
+            data["routes"].extend(replica_data.get("routes", []))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

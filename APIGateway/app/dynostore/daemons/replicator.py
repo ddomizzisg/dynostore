@@ -22,12 +22,12 @@ def start_replicator_daemon():
 def replicator_loop():
     # Wait a bit before starting
     time.sleep(10)
-    logger.info("Replicator daemon started.")
-    
+    interval = int(os.getenv("REPLICATOR_INTERVAL_S", "300"))
+    logger.info(f"Replicator daemon started (interval={interval}s).")
+
     while True:
         asyncio.run(force_replication_cycle())
-        # Parameterized for evaluation: every 5 minutes (300 seconds)
-        time.sleep(300)
+        time.sleep(interval)
 
 async def force_replication_cycle():
     metadata_service = os.getenv("METADATA_HOST", "metadata_server")
@@ -59,6 +59,11 @@ async def force_replication_cycle():
         num_to_replicate = max(1, int(len(object_reads) * 0.25))
         top_objects = object_reads[:num_to_replicate]
 
+        # Demand-proportional replication: one extra replica per
+        # REPLICATION_STEP_READS reads, capped at MAX_REPLICAS.
+        step_reads = max(1, int(os.getenv("REPLICATION_STEP_READS", "10")))
+        max_replicas = int(os.getenv("MAX_REPLICAS", "4"))
+
         for obj_degree in top_objects:
             n_reads = obj_degree.get("indegree", 0)
             if n_reads == 0:
@@ -67,44 +72,69 @@ async def force_replication_cycle():
             obj_id_ori = obj_degree.get("metadata_id", "").replace("metadata_", "")
             if not obj_id_ori:
                 continue
-            
+
             # Check if it is already a replica
             if "_r" in obj_id_ori:
                 continue
 
-            new_obj_id = obj_id_ori + "_r2"
-            
-            await replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pubsub_service)
-        
+            target_replicas = min(max_replicas, n_reads // step_reads)
+            if target_replicas < 1:
+                continue
+
+            # Replica levels are named _r2, _r3, ... Create at most one new
+            # level per cycle so the reconfiguration is gradual and observable.
+            for level in range(2, target_replicas + 2):
+                status = await replicate_object(obj_id_ori, level, n_reads, metadata_service, pubsub_service)
+                if status != "exists":
+                    break
+
         return True
     except Exception as e:
         logger.error(f"Replicator cycle error: {e}")
         return False
 
-async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pubsub_service):
+def _nodes_of(data):
+    nodes = [r.get("chunk", {}).get("server_id") if "chunk" in r else None for r in data.get("nodes", [])]
+    return [n for n in nodes if n is not None]
+
+async def replicate_object(obj_id_ori, level, n_reads, metadata_service, pubsub_service):
     import aiohttp
     import httpx
-    
+
+    new_obj_id = f"{obj_id_ori}_r{level}"
+
     # 1. Get original object metadata to find owner and original nodes
     url_get_meta = f"http://{metadata_service}/storage/internal/{obj_id_ori}"
-    
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.get(url_get_meta)
             if resp.status_code != 200:
                 logger.error(f"Could not fetch metadata for {obj_id_ori}")
-                return
+                return "error"
             data = resp.json()
             if not data.get("exists"):
-                return
+                return "error"
         except Exception as e:
             logger.error(f"Error fetching metadata for {obj_id_ori}: {e}")
-            return
-            
+            return "error"
+
     meta = data["metadata"]
     owner = meta["owner"]
-    original_nodes = [r.get("chunk", {}).get("server_id") if "chunk" in r else None for r in data.get("nodes", [])]
-    original_nodes = [n for n in original_nodes if n is not None]
+    original_nodes = _nodes_of(data)
+
+    # Exclude the nodes of every lower replica level too, so each new level
+    # lands on containers not yet holding this object.
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for prev_level in range(2, level):
+            prev_id = f"{obj_id_ori}_r{prev_level}"
+            try:
+                resp = await client.get(f"http://{metadata_service}/storage/internal/{prev_id}")
+                if resp.status_code == 200 and resp.json().get("exists"):
+                    original_nodes.extend(_nodes_of(resp.json()))
+            except Exception as e:
+                logger.error(f"Error fetching nodes of {prev_id}: {e}")
+    original_nodes = list(set(original_nodes))
 
     # Check if replica exists
     url_replica = f"http://{metadata_service}/storage/internal/{new_obj_id}"
@@ -113,10 +143,10 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
             resp = await client.get(url_replica)
             if resp.status_code == 200 and resp.json().get("exists"):
                 logger.info(f"Replica {new_obj_id} already exists.")
-                return
+                return "exists"
         except Exception as e:
             logger.error(f"Error checking if replica exists for {new_obj_id}: {e}")
-            return
+            return "error"
 
     # 2. Pull the original data
     logger.info(f"Replicating {obj_id_ori} to {new_obj_id} (owner={owner})")
@@ -124,17 +154,17 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
         obj_bytes, status, headers = await DataController.pull_data(owner, obj_id_ori, metadata_service, force_refresh=True)
         if status != 200:
             logger.error(f"Failed to pull {obj_id_ori}: {status}")
-            return
+            return "error"
     except Exception as e:
         logger.error(f"Exception pulling {obj_id_ori}: {e}")
-        return
+        return "error"
 
     # 3. Use an internal wrapper to avoid 'request.body'
     # Since DataController.upload_data takes a Quart request, we will duplicate its logic or create a helper.
     # We will simulate the request dictionary to register the metadata directly
     
     request_json = {
-        "name": meta["name"] + "_r2",
+        "name": meta["name"] + f"_r{level}",
         "size": meta["size"],
         "hash": meta["hash"],
         "is_encrypted": meta["is_encrypted"],
@@ -152,13 +182,13 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
             resp = await client.put(metadata_url, json=request_json)
             if resp.status_code != 201:
                 logger.error(f"Failed to register replica metadata: {resp.text}")
-                return
+                return "error"
             new_nodes = resp.json().get('nodes', [])
             if isinstance(new_nodes, dict):
                 new_nodes = new_nodes.get('routes', [])
         except Exception as e:
             logger.error(f"Exception registering replica {new_obj_id}: {e}")
-            return
+            return "error"
             
     meta_ms = (time.perf_counter_ns() - t_meta) / 1e6
     _log("debug", "UPLOAD_METADATA", new_obj_id, "-", "SUCCESS", f"total_time_ms={meta_ms:.3f}")
@@ -185,6 +215,8 @@ async def replicate_object(obj_id_ori, new_obj_id, n_reads, metadata_service, pu
         thread.start()
         _log("info", "UPLOAD_DATA", new_obj_id, "END", "SUCCESS", f"time_upload_ms={stream_ms:.3f};total_time_ms=0.000;chunks={request_json['chunks']};required={request_json['required_chunks']}")
         logger.info(f"Successfully started replication for {new_obj_id} excluding nodes {original_nodes}")
+        return "created"
     except Exception as e:
         logger.error(f"Failed to start EC thread for replica: {e}")
+        return "error"
 

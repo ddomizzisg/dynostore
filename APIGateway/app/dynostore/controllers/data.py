@@ -180,7 +180,8 @@ class DataController:
         removed = 0
         if len(entries) > max_files:
             entries.sort()
-            for _, path in entries[:-max_files]:
+            to_remove = entries if max_files == 0 else entries[:-max_files]
+            for _, path in to_remove:
                 try:
                     t_rm = _t0()
                     os.remove(path)
@@ -379,48 +380,42 @@ class DataController:
                     pr = 999.0
                 return (not route.get("is_replica", False), pr)
 
-            # Group by chunk id for robust fallbacks
-            routes_by_cid = {}
-            for route in routes:
-                try:
-                    cid = int(route["chunk"]["name"].split("_")[0].replace("c", "")) - 1
-                except Exception:
-                    cid = 0
-                if cid not in routes_by_cid:
-                    routes_by_cid[cid] = []
-                routes_by_cid[cid].append(route)
-                
-            unique_cids = list(routes_by_cid.keys())
-            
-            import random
-            random.shuffle(unique_cids)
-            
             async with aiohttp.ClientSession() as session_reqs:
-                async def fetch_with_fallback(cid):
-                    chunk_routes = routes_by_cid.get(cid, [])
-                    if os.getenv("ENABLE_KAGIO", "true").lower() == "true":
-                        # Use weighted random scoring based on PageRank (no local import)
-                        for r in chunk_routes:
-                            pr = get_pr(r)[1]
-                            weight = 1.0 / (pr + 1e-6)
-                            r['_weight'] = random.random() ** (1.0 / weight)
-                        chunk_routes.sort(key=lambda x: x.get('_weight', 0), reverse=True)
+                import random
+                routes_copy = list(routes)
+                random.shuffle(routes_copy)
+                
+                pending_tasks = []
+                for route in routes_copy:
+                    if route.get('is_replica'):
+                        target_key = route.get('replica_key') or key_object + "_r2"
                     else:
-                        random.shuffle(chunk_routes)
-
-                    print("chunk routes" + str(chunk_routes), flush=True )
-                        
-                    for route in chunk_routes:
-                        target_key = key_object + "_r2" if route.get('is_replica') else key_object
+                        target_key = key_object
+                    task = asyncio.create_task(DataController.download_chunk(session_reqs, route, target_key))
+                    pending_tasks.append(task)
+                
+                results_dict = {}
+                
+                while len(results_dict) < k and pending_tasks:
+                    done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
                         try:
-                            return await DataController.download_chunk(session_reqs, route, target_key)
+                            cid, data = task.result()
+                            if cid not in results_dict:
+                                results_dict[cid] = data
+                            if len(results_dict) == k:
+                                break
                         except Exception:
-                            continue
-                    raise Exception(f"All container routes for chunk {cid} failed.")
-                    
-                # Request exactly k unique chunks
-                tasks = [fetch_with_fallback(cid) for cid in unique_cids[:k]]
-                results = await asyncio.gather(*tasks)
+                            pass
+                    pending_tasks = list(pending)
+
+                for task in pending_tasks:
+                    task.cancel()
+
+                if len(results_dict) < k:
+                    raise Exception("Failed to retrieve enough chunks for reconstruction.")
+                
+                results = list(results_dict.items())
         except Exception as e:
             _log("error", "PULL_CHUNKS", key_object,
                  "END", "ERROR", f"msg={e}")

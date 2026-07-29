@@ -2,13 +2,16 @@ version: "3.8"
 
 x-kagio-env: &kagio-env
   # KAGIO ENVIRONMENT VARIABLES
-  API_BASE_URL: "http://192.168.1.116:8080"
+  API_BASE_URL: "http://192.168.1.227:8080"
   ROOT_USER: "root"
   KAGIO_FOXX_URL: "http://localhost:8529/_db/_system/kagio"
   KAGIO_FOXX_DB: "fgcs"
-  ENABLE_KAGIO: "${ENABLE_KAGIO:-true}"
+  ENABLE_KAGIO: "${ENABLE_KAGIO:-false}"
   LOAD_BALANCER: "${LOAD_BALANCER:-two_choices}"
-  ENABLE_REPLICATOR: "${ENABLE_REPLICATOR:-true}"
+  ENABLE_REPLICATOR: "${ENABLE_REPLICATOR:-false}"
+  REPLICATOR_INTERVAL_S: "${REPLICATOR_INTERVAL_S:-300}"
+  REPLICATION_STEP_READS: "${REPLICATION_STEP_READS:-10}"
+  MAX_REPLICAS: "${MAX_REPLICAS:-4}"
   
 
 services:
@@ -45,7 +48,7 @@ services:
       AUTH_HOST: auth
       PUB_SUB_HOST: pub_sub
       METADATA_HOST: metadata_server
-      PUBLIC_IP: 192.168.1.116:8070
+      PUBLIC_IP: 192.168.1.227:8070
       LOG_WATCHER_LOG_FILE: /app/logs/kagio.log
       LOG_FILES: '["/app/logs/dynostore.log"]'
       CACHE_MAX_FILES: 0
