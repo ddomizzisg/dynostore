@@ -295,7 +295,7 @@ def wait_for_pagerank_update(kagio_host, old_pr, timeout=30):
     print("  -> Warning: KAGIO PageRanks did not change within timeout.")
     return False
 
-def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None, read_distribution="sequential", target_percentage=25):
+def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload=None, build_containers=False, runner="apptainer", delay_factor=1.0, kagio_timeout=90, skip_barriers=False, rnd=None, enable_kagio_phase3=None, read_distribution="sequential", target_percentage=25, concurrent_clients=1):
     if enable_kagio_phase3 is None:
         enable_kagio_phase3 = enable_kagio_phase1
 
@@ -378,8 +378,22 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
     t_ingest_end = time.time()
     ingestion_time = t_ingest_end - t_ingest_start
 
+    # Mid-Scenario Restart for Hybrid Scenarios
+    if enable_kagio_phase1 != enable_kagio_phase3:
+        print(f"\n--- Mid-Scenario Restart: Switching KAGIO (PR) strategy to {enable_kagio_phase3} ---")
+        restart_cluster(enable_kagio_phase3, enable_replicator, build_containers=False, runner=runner)
+        # We must re-instantiate the client so it can authenticate again
+        client = Client(gateway_host)
+        
+        if enable_kagio_phase3 and not skip_barriers and objects:
+            print("\n  -> Waiting for KAGIO to sync warmup reads after restart...")
+            targets = {obj["id"]: obj["reads"] for obj in objects}
+            wait_for_all_kagio_sync(kagio_host, targets, timeout=kagio_timeout)
+            pr_snapshot = get_pageranks(kagio_host)
+            wait_for_pagerank_update(kagio_host, pr_snapshot, timeout=kagio_timeout)
+
     print("\n--- Collecting metrics before replication ---")
-    metrics_before_repl = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase1)
+    metrics_before_repl = collect_metrics(kagio_host, enable_kagio=enable_kagio_phase3)
     replication_time = 0.0
 
     if enable_replicator:
@@ -412,13 +426,6 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
         time.sleep(5 * delay_factor) # Small buffer after replication
     else:
         print("\n--- Phase 2: Replication disabled, skipping ---")
-
-    # Mid-Scenario Restart for Hybrid Scenarios
-    if enable_kagio_phase1 != enable_kagio_phase3:
-        print(f"\n--- Mid-Scenario Restart: Switching KAGIO (PR) strategy to {enable_kagio_phase3} ---")
-        restart_cluster(enable_kagio_phase3, enable_replicator, build_containers=False, runner=runner)
-        # We must re-instantiate the client so it can authenticate again
-        client = Client(gateway_host)
 
     print("\n--- Collecting PageRanks before benchmark ---")
     if enable_kagio_phase3:
@@ -483,7 +490,42 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
     
     t_start = time.time()
     
-    if read_distribution == "pareto":
+    if concurrent_clients > 1:
+        import concurrent.futures
+        print(f"\n--- Running Benchmark Phase with {concurrent_clients} concurrent clients ---")
+        ops = []
+        if read_distribution == "pareto":
+            total_benchmark_reads = sum(obj["benchmark_reads"] for obj in top_25)
+            alpha = 1.35
+            weights = [1.0 / ((i + 1) ** alpha) for i in range(top_25_count)]
+            sampled_objects = rnd.choices(top_25, weights=weights, k=total_benchmark_reads)
+            ops = sampled_objects
+        else:
+            for obj in top_25:
+                ops.extend([obj] * obj["benchmark_reads"])
+        
+        def do_read(obj):
+            t0 = time.time()
+            try:
+                client.get(key=obj["id"])
+                t1 = time.time()
+                time.sleep(sample_read_delay(rnd) * delay_factor)
+                return (True, t1 - t0, obj.get("size_MB", 1))
+            except Exception as e:
+                return (False, 0, 0)
+                
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_clients) as executor:
+            futures = [executor.submit(do_read, obj) for obj in ops]
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                success, lat, sz = future.result()
+                if success:
+                    read_latencies.append(lat)
+                    benchmark_mb_read += sz
+                else:
+                    failed_benchmark_reads += 1
+                if (i + 1) % max(10, len(ops) // 10) == 0:
+                    print(f"[{i+1}/{len(ops)}] Concurrent reads completed...")
+    elif read_distribution == "pareto":
         total_benchmark_reads = sum(obj["benchmark_reads"] for obj in top_25)
         # Generate Zipfian weights (1/rank^alpha)
         alpha = 1.35
@@ -583,8 +625,10 @@ def run_scenario(scenario_name, enable_kagio_phase1, enable_replicator, workload
             repl_storage_overhead_mb += (data.get("storage_MB", 0) - before_data.get("storage_MB", 0))
             repl_objects_overhead += (data.get("objects_count", 0) - before_data.get("objects_count", 0))
 
-    read_throughput_mb_s = round(benchmark_mb_read / max(perf_time, 0.001), 2)
-    write_throughput_mb_s = round(total_mb_written / max(ingestion_time, 0.001), 2)
+    actual_read_time = sum(read_latencies)
+    actual_write_time = sum(write_latencies)
+    read_throughput_mb_s = round(benchmark_mb_read / max(actual_read_time, 0.001), 2)
+    write_throughput_mb_s = round(total_mb_written / max(actual_write_time, 0.001), 2)
     
     read_percentiles = calculate_percentiles(read_latencies)
     write_percentiles = calculate_percentiles(write_latencies)
@@ -642,6 +686,7 @@ def main():
     parser.add_argument("--kagio-timeout", type=int, default=90, help="Maximum wait time in seconds for KAGIO sync barriers")
     parser.add_argument("--read-distribution", type=str, choices=["sequential", "pareto"], default="sequential", help="Distribution of reads during Phase 3 Benchmark")
     parser.add_argument("--target-percentage", type=float, default=100, help="Percentage of objects to target during benchmarking (1-100)")
+    parser.add_argument("--concurrent-clients", type=int, default=1, help="Number of concurrent clients during Phase 3")
     parser.add_argument("--equal-reads", action="store_true", help="Force benchmark reads to exactly equal warming reads per object")
     args = parser.parse_args()
     
@@ -717,7 +762,8 @@ def main():
             "runner": args.runner,
             "rnd": random.Random(),
             "read_distribution": args.read_distribution,
-            "target_percentage": args.target_percentage
+            "target_percentage": args.target_percentage,
+            "concurrent_clients": args.concurrent_clients
         }
 
     try:

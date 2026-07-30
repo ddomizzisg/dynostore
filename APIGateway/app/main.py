@@ -513,8 +513,11 @@ async def aggregate_metrics():
 
     tasks = [fetch_metric(i) for i in range(1, 11)]
     results = await asyncio.gather(*tasks)
-    
+
     metrics = {f"datacontainer{dc_id}": data for dc_id, data in results}
+    chunks_served = DataController.get_chunks_served()
+    for dc_name, data in metrics.items():
+        data["chunks_served"] = chunks_served.get(dc_name, 0)
     return jsonify(metrics), 200
 
 @app.route("/metrics/reset", methods=["POST"])
@@ -530,7 +533,8 @@ async def reset_metrics():
 
     tasks = [reset_metric(i) for i in range(1, 11)]
     await asyncio.gather(*tasks)
-    
+    DataController.reset_chunks_served()
+
     return jsonify({"message": "Metrics reset across all containers"}), 200
 
 @app.before_serving

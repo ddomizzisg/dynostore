@@ -151,7 +151,7 @@ async def replicate_object(obj_id_ori, level, n_reads, metadata_service, pubsub_
     # 2. Pull the original data
     logger.info(f"Replicating {obj_id_ori} to {new_obj_id} (owner={owner})")
     try:
-        obj_bytes, status, headers = await DataController.pull_data(owner, obj_id_ori, metadata_service, force_refresh=True)
+        obj_bytes, status, headers = await DataController.pull_data(owner, obj_id_ori, metadata_service, force_refresh=True, source="replicator")
         if status != 200:
             logger.error(f"Failed to pull {obj_id_ori}: {status}")
             return "error"

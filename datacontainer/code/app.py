@@ -74,26 +74,29 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS metrics
                  (key TEXT PRIMARY KEY, value INTEGER)''')
     c.execute('''INSERT OR IGNORE INTO metrics (key, value) VALUES ('requests_attended', 0)''')
+    c.execute('''INSERT OR IGNORE INTO metrics (key, value) VALUES ('internal_requests_attended', 0)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-def increment_requests():
+def increment_requests(internal=False):
+    key = 'internal_requests_attended' if internal else 'requests_attended'
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         c = conn.cursor()
-        c.execute('''UPDATE metrics SET value = value + 1 WHERE key = 'requests_attended' ''')
+        c.execute('''UPDATE metrics SET value = value + 1 WHERE key = ?''', (key,))
         conn.commit()
         conn.close()
     except Exception as e:
         _log("METRICS", "-", "END", "ERROR", f"msg=Failed to update metrics db: {e}")
 
-def get_requests_attended():
+def get_requests_attended(internal=False):
+    key = 'internal_requests_attended' if internal else 'requests_attended'
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         c = conn.cursor()
-        c.execute('''SELECT value FROM metrics WHERE key = 'requests_attended' ''')
+        c.execute('''SELECT value FROM metrics WHERE key = ?''', (key,))
         row = c.fetchone()
         conn.close()
         return row[0] if row else 0
@@ -104,7 +107,7 @@ def reset_metrics():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         c = conn.cursor()
-        c.execute('''UPDATE metrics SET value = 0 WHERE key = 'requests_attended' ''')
+        c.execute('''UPDATE metrics SET value = 0''')
         conn.commit()
         conn.close()
     except Exception as e:
@@ -128,10 +131,10 @@ def metrics():
             objects_count += len([f for f in files if f != '.gitkeep'])
             
     storage_mb = storage.filesystem.utilization / (1024 * 1024)
-    requests_attended = get_requests_attended()
-    
+
     return jsonify({
-        "requests_attended": requests_attended,
+        "requests_attended": get_requests_attended(),
+        "internal_requests_attended": get_requests_attended(internal=True),
         "objects_count": objects_count,
         "storage_MB": round(storage_mb, 2)
     }), 200
@@ -164,7 +167,7 @@ def download_object(objectkey, tokenuser):
         try:
             generator = storage.get_stream(objectkey)
             _log("DOWNLOAD", objectkey, "END", "SUCCESS", f"status=200", level="info")
-            increment_requests()
+            increment_requests(internal=request.headers.get("X-Dynostore-Source", "client") != "client")
             return Response(stream_with_context(generator)), 200
         except Exception as e:
             _log("DOWNLOAD", objectkey, "END", "ERROR", f"msg={e};status=500", level="error")

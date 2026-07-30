@@ -198,6 +198,30 @@ class DataController:
     def _http_url(route):
         return route if route.startswith("http") else f"http://{route}"
 
+    # Per-container count of chunks that were actually used to answer client
+    # reads (hedged requests that lost the race are not counted). Single
+    # event loop, so plain dict updates are safe.
+    _chunks_served = {}
+
+    @classmethod
+    def get_chunks_served(cls):
+        return dict(cls._chunks_served)
+
+    @classmethod
+    def reset_chunks_served(cls):
+        cls._chunks_served = {}
+
+    @staticmethod
+    def _route_container(route):
+        server_id = route.get("chunk", {}).get("server_id")
+        if server_id is not None:
+            return f"datacontainer{server_id}"
+        try:
+            from urllib.parse import urlparse
+            return urlparse(DataController._http_url(route['route'])).hostname
+        except Exception:
+            return "unknown"
+
     @staticmethod
     def _get_cache_path(token_user, key_object):
         safe_user = hashlib.sha1(token_user.encode()).hexdigest()
@@ -240,7 +264,7 @@ class DataController:
                 return {"error": str(e)}, 500
 
     @staticmethod
-    async def download_chunk(session, route, key_object):
+    async def download_chunk(session, route, key_object, source="client"):
         print(f"Downloading chunk from route: {route}", flush=True)
         chunk_id = 0
         if "chunk" in route:
@@ -264,16 +288,16 @@ class DataController:
         t0 = _t0()
         _log("debug", "DOWNLOAD_CHUNK", key_object, "START",
              "RUN", f"chunk_id={chunk_str};url={url};attempt=1")
-        async with session.get(url) as resp:
+        async with session.get(url, headers={"X-Dynostore-Source": source}) as resp:
             resp.raise_for_status()
             data = await resp.read()
         dt_ms = _ms_since(t0)
         _log("debug", "DOWNLOAD_CHUNK", key_object, "END", "SUCCESS",
              f"chunk_id={chunk_id};bytes={len(data)};time_ms={dt_ms:.3f};attempt=1")
-        return chunk_id, data
+        return chunk_id, data, DataController._route_container(route)
 
     @staticmethod
-    async def pull_data(token_user, key_object, metadata_service, force_refresh=False):
+    async def pull_data(token_user, key_object, metadata_service, force_refresh=False, source="client"):
         t_total = _t0()
         
         decode_start = time.perf_counter_ns()
@@ -391,18 +415,18 @@ class DataController:
                         target_key = route.get('replica_key') or key_object + "_r2"
                     else:
                         target_key = key_object
-                    task = asyncio.create_task(DataController.download_chunk(session_reqs, route, target_key))
+                    task = asyncio.create_task(DataController.download_chunk(session_reqs, route, target_key, source=source))
                     pending_tasks.append(task)
-                
+
                 results_dict = {}
-                
+
                 while len(results_dict) < k and pending_tasks:
                     done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         try:
-                            cid, data = task.result()
+                            cid, data, dc_name = task.result()
                             if cid not in results_dict:
-                                results_dict[cid] = data
+                                results_dict[cid] = (data, dc_name)
                             if len(results_dict) == k:
                                 break
                         except Exception:
@@ -414,8 +438,15 @@ class DataController:
 
                 if len(results_dict) < k:
                     raise Exception("Failed to retrieve enough chunks for reconstruction.")
-                
-                results = list(results_dict.items())
+
+                # Credit only the containers whose chunks were actually used,
+                # and only for client-facing reads (not replicator pulls).
+                if source == "client":
+                    for _data, dc_name in results_dict.values():
+                        DataController._chunks_served[dc_name] = \
+                            DataController._chunks_served.get(dc_name, 0) + 1
+
+                results = [(cid, data) for cid, (data, _dc) in results_dict.items()]
         except Exception as e:
             _log("error", "PULL_CHUNKS", key_object,
                  "END", "ERROR", f"msg={e}")
