@@ -163,6 +163,45 @@ class DataController:
             await asyncio.sleep(cache_ttl)
 
     @staticmethod
+    def cleanup_temp(temp_dir=".temp"):
+        """Sweep leftovers from before EC cleanup existed (or crashed runs).
+
+        Removes staged object payloads whose EC already completed (no .pending
+        marker), their orphaned upload-metadata JSON, and lock files. Keeps
+        payloads with a .pending marker (EC pending/failed, kept for retry)
+        and timeline JSONs (served by the /timeline endpoint).
+        """
+        if not os.path.isdir(temp_dir):
+            return
+        removed, freed = 0, 0
+        for name in os.listdir(temp_dir):
+            path = os.path.join(temp_dir, name)
+            if not os.path.isfile(path):
+                continue
+            if name.endswith(".lock"):
+                keep = False
+            elif name.endswith(".pending") or name.endswith(".timeline.json"):
+                keep = True
+            elif name.endswith(".json"):
+                # upload metadata: only needed while its payload awaits EC
+                keep = os.path.exists(os.path.join(temp_dir, name[:-5]) + ".pending")
+            else:
+                # staged full object payload
+                keep = os.path.exists(path + ".pending")
+            if keep:
+                continue
+            try:
+                size = os.path.getsize(path)
+                os.remove(path)
+                removed += 1
+                freed += size
+            except Exception as e:
+                _log("warning", "TEMP_CLEAN", "-", "END", "REMOVE_ERROR",
+                     f"path={path};msg={e}")
+        _log("info", "TEMP_CLEAN", "-", "END", "SUCCESS",
+             f"removed={removed};freed_mb={freed / 1e6:.1f}")
+
+    @staticmethod
     def evict_cache(max_files=100):
         _log("debug", "EVICT_CACHE", "-", "START",
              "INIT", f"max_files={max_files}")
@@ -682,6 +721,19 @@ class DataController:
                 except Exception as e:
                     _log("warning", "PASSIVE_EC_MARKER", key_object, "END", "REMOVE_ERROR",
                          f"marker={marker_path};msg={e}")
+
+            # the fragments now live on the data containers; drop the staged
+            # full copy and its upload metadata so .temp does not grow forever
+            # (on failure both stay, together with the marker, for retry)
+            for stale in (object_path, f".temp/{key_object}.json"):
+                try:
+                    if os.path.exists(stale):
+                        os.remove(stale)
+                        _log("debug", "EC_TEMP_CLEAN", key_object, "END", "REMOVE_OK",
+                             f"path={stale}")
+                except Exception as e:
+                    _log("warning", "EC_TEMP_CLEAN", key_object, "END", "REMOVE_ERROR",
+                         f"path={stale};msg={e}")
 
             # write timeline (atomic merge)
             _merge_timeline_atomic(timeline_path, {

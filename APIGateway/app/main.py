@@ -151,6 +151,8 @@ PUBLIC_IP = os.getenv('PUBLIC_IP', 'localhost')
 db.create_all()
 
 import os
+DataController.cleanup_temp()
+
 if os.getenv("ENABLE_REPLICATOR", "true").lower() == "true":
     from dynostore.daemons.replicator import start_replicator_daemon
     start_replicator_daemon()
